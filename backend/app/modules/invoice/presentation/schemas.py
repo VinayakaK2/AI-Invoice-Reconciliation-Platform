@@ -126,3 +126,72 @@ class CSVImportResultResponse(BaseModel):
     failed_count: int
     errors: List[CSVRowErrorResponse]
     imported_invoices: List[InvoiceResponse]
+
+
+class DocumentListItemResponse(BaseModel):
+    """Summary of an uploaded document with optional invoice reference."""
+    id: UUID
+    file_name: str
+    file_size_bytes: int
+    mime_type: str
+    ocr_status: str
+    overall_confidence: Optional[Decimal] = None
+    is_ambiguous: bool = True
+    invoice_id: Optional[UUID] = None
+    invoice_number: Optional[str] = None
+    total_amount: Optional[Decimal] = None
+    currency: Optional[str] = None
+    created_at: datetime
+
+
+class DocumentListResponse(BaseModel):
+    """Paginated list of uploaded documents."""
+    items: List[DocumentListItemResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class DocumentDetailResponse(BaseModel):
+    """Detailed view of an uploaded document, structured extraction, and linked invoice."""
+    id: UUID
+    file_name: str
+    file_size_bytes: int
+    mime_type: str
+    file_hash: str
+    ocr_status: str
+    extracted_data: Optional[Dict[str, Any]] = None
+    invoice_id: Optional[UUID] = None
+    linked_invoice: Optional[InvoiceResponse] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class DocumentCorrectionRequest(BaseModel):
+    """Schema for submitting human corrections to extracted document fields."""
+    invoice_number: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    customer_id: Optional[UUID] = None
+    issue_date: Optional[date] = None
+    due_date: Optional[date] = None
+    total_amount: Optional[Decimal] = Field(default=None, gt=0, decimal_places=2)
+    tax_amount: Optional[Decimal] = Field(default=None, ge=0, decimal_places=2)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+
+class DocumentPromoteRequest(BaseModel):
+    """Schema for promoting an uploaded document into an active operational PENDING invoice."""
+    customer_id: UUID = Field(..., description="Target customer UUID to bind the invoice to")
+    invoice_number: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    issue_date: Optional[date] = None
+    due_date: Optional[date] = None
+    total_amount: Optional[Decimal] = Field(default=None, gt=0, decimal_places=2)
+    tax_amount: Optional[Decimal] = Field(default=None, ge=0, decimal_places=2)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    notes: Optional[str] = Field(default=None, max_length=1000)
+
+
+class DocumentRetryRequest(BaseModel):
+    """Schema for re-executing OCR extraction on a document."""
+    auto_create_draft: bool = Field(default=True, description="Whether to generate draft invoice if minimal fields extracted")
+

@@ -45,6 +45,7 @@ class InvoiceDocumentRepository:
             ocr_status=OCRStatus(model.ocr_status),
             extracted_data=model.extracted_data,
             created_at=model.created_at,
+            updated_at=getattr(model, "updated_at", model.created_at) or model.created_at,
         )
 
     def create(self, doc: InvoiceDocument) -> InvoiceDocument:
@@ -61,6 +62,7 @@ class InvoiceDocumentRepository:
             ocr_status=doc.ocr_status.value,
             extracted_data=doc.extracted_data,
             created_at=doc.created_at,
+            updated_at=doc.updated_at,
         )
         self.db.add(model)
         self.db.flush()
@@ -104,6 +106,27 @@ class InvoiceDocumentRepository:
             model.invoice_id = invoice_id
             self.db.flush()
 
+    def update(self, doc: InvoiceDocument) -> InvoiceDocument:
+        """Persist domain entity updates."""
+        model = (
+            self.db.query(InvoiceDocumentModel)
+            .filter(
+                InvoiceDocumentModel.id == doc.id,
+                InvoiceDocumentModel.company_id == doc.company_id,
+            )
+            .first()
+        )
+        if not model:
+            from app.shared.exceptions import NotFoundError
+            raise NotFoundError("InvoiceDocument", str(doc.id))
+
+        model.invoice_id = doc.invoice_id
+        model.ocr_status = doc.ocr_status.value
+        model.extracted_data = doc.extracted_data
+        model.updated_at = doc.updated_at
+        self.db.flush()
+        return self._to_domain(model)
+
     def update_ocr_status(
         self,
         doc_id: UUID,
@@ -124,7 +147,67 @@ class InvoiceDocumentRepository:
             model.ocr_status = ocr_status.value
             if extracted_data is not None:
                 model.extracted_data = extracted_data
+            model.updated_at = datetime.now(timezone.utc)
             self.db.flush()
+
+    def delete(self, doc_id: UUID, company_id: UUID) -> bool:
+        """Delete document record from tenant database."""
+        model = (
+            self.db.query(InvoiceDocumentModel)
+            .filter(
+                InvoiceDocumentModel.id == doc_id,
+                InvoiceDocumentModel.company_id == company_id,
+            )
+            .first()
+        )
+        if not model:
+            return False
+        self.db.delete(model)
+        self.db.flush()
+        return True
+
+    def list_documents(
+        self,
+        company_id: UUID,
+        ocr_status: Optional[str] = None,
+        has_invoice: Optional[bool] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Tuple[List[InvoiceDocument], int]:
+        """Query paginated documents within tenant context with optional filters."""
+        query = self.db.query(InvoiceDocumentModel).filter(
+            InvoiceDocumentModel.company_id == company_id
+        )
+        if ocr_status:
+            query = query.filter(InvoiceDocumentModel.ocr_status == ocr_status)
+        if has_invoice is True:
+            query = query.filter(InvoiceDocumentModel.invoice_id.isnot(None))
+        elif has_invoice is False:
+            query = query.filter(InvoiceDocumentModel.invoice_id.is_(None))
+
+        total = query.count()
+        models = (
+            query.order_by(InvoiceDocumentModel.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return [self._to_domain(m) for m in models], total
+
+    def acquire_for_processing(
+        self, doc_id: UUID, company_id: UUID
+    ) -> Optional[InvoiceDocument]:
+        """Fetch document verifying existence within tenant context."""
+        model = (
+            self.db.query(InvoiceDocumentModel)
+            .filter(
+                InvoiceDocumentModel.id == doc_id,
+                InvoiceDocumentModel.company_id == company_id,
+            )
+            .first()
+        )
+        return self._to_domain(model) if model else None
+
 
 
 class InvoiceRepository:

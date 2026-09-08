@@ -31,10 +31,17 @@ class InvoiceSource(str, Enum):
 
 class OCRStatus(str, Enum):
     """Processing states for OCR and document extraction."""
-    PENDING = "PENDING"
-    COMPLETED = "COMPLETED"
+    UPLOADED = "UPLOADED"
+    PROCESSING = "PROCESSING"
+    EXTRACTED = "EXTRACTED"
+    VALIDATION_REQUIRED = "VALIDATION_REQUIRED"
+    VALIDATED = "VALIDATED"
     FAILED = "FAILED"
     MANUALLY_CORRECTED = "MANUALLY_CORRECTED"
+
+    # Backward-compatible Phase 11 aliases
+    PENDING = "PENDING"
+    COMPLETED = "COMPLETED"
 
 
 @dataclass
@@ -50,21 +57,92 @@ class InvoiceDocument:
     invoice_id: Optional[UUID] = None
     ocr_status: OCRStatus = OCRStatus.PENDING
     extracted_data: Optional[Dict[str, Any]] = None
+    retry_count: int = 0
+    max_retries: int = 3
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def belongs_to(self, company_id: UUID) -> bool:
         """Verify document belongs to the authenticated tenant context."""
         return self.company_id == company_id
 
+    def start_processing(self) -> None:
+        """Transition from UPLOADED or FAILED to actively PROCESSING."""
+        if self.ocr_status not in (
+            OCRStatus.UPLOADED,
+            OCRStatus.PENDING,
+            OCRStatus.FAILED,
+            OCRStatus.VALIDATION_REQUIRED,
+        ):
+            raise DomainError(
+                f"Cannot start processing document currently in status '{self.ocr_status.value}'."
+            )
+        self.ocr_status = OCRStatus.PROCESSING
+        self.updated_at = datetime.now(timezone.utc)
+
+    def mark_extracted(self, raw_data: Dict[str, Any]) -> None:
+        """Record raw extraction completion before validation."""
+        if self.ocr_status != OCRStatus.PROCESSING:
+            raise DomainError(
+                f"Cannot mark extracted; document is in status '{self.ocr_status.value}', expected PROCESSING."
+            )
+        self.ocr_status = OCRStatus.EXTRACTED
+        self.extracted_data = raw_data
+        self.updated_at = datetime.now(timezone.utc)
+
+    def mark_validated(self, payload: Dict[str, Any]) -> None:
+        """Mark document as cleanly validated and ready for invoice association."""
+        if self.ocr_status not in (
+            OCRStatus.EXTRACTED,
+            OCRStatus.VALIDATION_REQUIRED,
+            OCRStatus.PROCESSING,
+            OCRStatus.MANUALLY_CORRECTED,
+            OCRStatus.VALIDATED,
+        ):
+            raise DomainError(
+                f"Cannot validate document from status '{self.ocr_status.value}'."
+            )
+        self.ocr_status = OCRStatus.VALIDATED
+        self.extracted_data = payload
+        self.updated_at = datetime.now(timezone.utc)
+
+    def mark_validation_required(self, payload: Dict[str, Any]) -> None:
+        """Flag extraction as requiring human review or correction."""
+        if self.ocr_status not in (OCRStatus.EXTRACTED, OCRStatus.PROCESSING):
+            raise DomainError(
+                f"Validation required can only be set from EXTRACTED or PROCESSING, got '{self.ocr_status.value}'."
+            )
+        self.ocr_status = OCRStatus.VALIDATION_REQUIRED
+        self.extracted_data = payload
+        self.updated_at = datetime.now(timezone.utc)
+
     def mark_ocr_completed(self, data: Dict[str, Any]) -> None:
-        """Record successful extraction of structured invoice fields."""
+        """Backward-compatible method: record completed extraction."""
         self.ocr_status = OCRStatus.COMPLETED
         self.extracted_data = data
+        self.updated_at = datetime.now(timezone.utc)
 
-    def mark_ocr_failed(self, error_message: str) -> None:
-        """Record failed extraction."""
+    def mark_ocr_failed(self, error_message: str, is_retryable: bool = False) -> None:
+        """Record failed extraction with retry metadata."""
         self.ocr_status = OCRStatus.FAILED
-        self.extracted_data = {"error": error_message}
+        self.extracted_data = {
+            "error": error_message,
+            "retryable": is_retryable,
+            "retry_count": self.retry_count,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.updated_at = datetime.now(timezone.utc)
+
+    def mark_manually_corrected(self, data: Dict[str, Any]) -> None:
+        """Record human accountant corrections."""
+        self.ocr_status = OCRStatus.MANUALLY_CORRECTED
+        self.extracted_data = data
+        self.updated_at = datetime.now(timezone.utc)
+
+    def can_retry(self) -> bool:
+        """Check if failed document can be safely retried."""
+        return self.ocr_status == OCRStatus.FAILED and self.retry_count < self.max_retries
+
 
 
 @dataclass
