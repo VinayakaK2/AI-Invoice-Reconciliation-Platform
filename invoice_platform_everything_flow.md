@@ -620,7 +620,7 @@ flowchart LR
 
     DECIDE -->|APPROVE| APPROVE[Approve proposed allocation]
     DECIDE -->|REJECT| REJECT[Reject suggestion]
-    DECIDE -->|CHANGE| CHANGE[Select different invoice(s) / allocation]
+    DECIDE -->|CHANGE| CHANGE[Select different invoice / allocation]
     DECIDE -->|DEFER| DEFER[Keep unresolved]
 
     APPROVE --> FIN[Financial Update]
