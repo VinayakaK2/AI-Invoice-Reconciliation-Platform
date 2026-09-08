@@ -32,6 +32,7 @@ from app.modules.invoice.domain.entities import (
     InvoiceStatus,
     OCRStatus,
 )
+from app.modules.invoice.domain.file_security import FileSecurityValidator
 from app.modules.invoice.infrastructure.repositories import (
     InvoiceDocumentRepository,
     InvoiceRepository,
@@ -171,12 +172,12 @@ class UploadInvoiceDocumentUseCase:
         auto_create_draft: bool = True,
     ) -> Tuple[InvoiceDocument, ExtractedInvoiceData, Optional[Invoice]]:
         """Upload source invoice, execute extraction, and generate draft invoice."""
-        # 1. Validation of extension and size
-        ext = Path(filename).suffix.lower()
-        if ext not in settings.ALLOWED_UPLOAD_EXTENSIONS:
-            raise ValidationError(
-                f"File extension '{ext}' not allowed. Permitted types: {settings.ALLOWED_UPLOAD_EXTENSIONS}"
-            )
+        # 1. Validation of magic bytes, extension and size
+        detected_mime, _ = FileSecurityValidator.validate_file_safety(
+            content=file_content,
+            filename=filename,
+            max_size_bytes=settings.MAX_UPLOAD_SIZE_BYTES,
+        )
 
         # 2. Persist to storage
         storage_key, file_hash, file_size = self.storage.save_file(file_content, filename, company_id)
@@ -185,7 +186,7 @@ class UploadInvoiceDocumentUseCase:
         existing_doc = self.document_repo.get_by_hash(file_hash, company_id)
         if existing_doc:
             # Document already processed; perform OCR on existing or return
-            extracted = self.ocr.extract_from_file(file_content, filename, mime_type)
+            extracted = self.ocr.extract_from_file(file_content, filename, detected_mime)
             existing_inv = (
                 self.invoice_repo.get_by_id(existing_doc.invoice_id, company_id)
                 if existing_doc.invoice_id
@@ -195,8 +196,11 @@ class UploadInvoiceDocumentUseCase:
 
         # 3. Perform OCR Extraction
         try:
-            extracted_data = self.ocr.extract_from_file(file_content, filename, mime_type)
-            ocr_status = OCRStatus.COMPLETED
+            extracted_data = self.ocr.extract_from_file(file_content, filename, detected_mime)
+            if extracted_data.is_ambiguous or extracted_data.confidence < Decimal("0.85"):
+                ocr_status = OCRStatus.VALIDATION_REQUIRED
+            else:
+                ocr_status = OCRStatus.COMPLETED
         except Exception as ex:
             extracted_data = ExtractedInvoiceData(
                 confidence=Decimal("0.00"),
@@ -344,7 +348,15 @@ class ConfirmDraftInvoiceUseCase:
 
         # Publish draft to PENDING and validate all invariants
         invoice.publish_draft(customer_id)
-        return self.invoice_repo.update(invoice)
+        updated_inv = self.invoice_repo.update(invoice)
+        if invoice.document_id:
+            doc_repo = InvoiceDocumentRepository(self.invoice_repo.db)
+            doc_repo.update_ocr_status(
+                doc_id=invoice.document_id,
+                company_id=company_id,
+                ocr_status=OCRStatus.MANUALLY_CORRECTED,
+            )
+        return updated_inv
 
 
 class ImportInvoicesCSVUseCase:
@@ -716,3 +728,396 @@ class UnarchiveInvoiceUseCase:
 
         invoice.unarchive()
         return self.repo.update(invoice)
+
+
+class GetInvoiceDocumentUseCase:
+    """Fetch document metadata, extraction details, and optional linked invoice."""
+
+    def __init__(self, db: Session) -> None:
+        self.doc_repo = InvoiceDocumentRepository(db)
+        self.inv_repo = InvoiceRepository(db)
+
+    def execute(self, doc_id: UUID, company_id: UUID) -> Tuple[InvoiceDocument, Optional[Invoice]]:
+        doc = self.doc_repo.get_by_id(doc_id, company_id)
+        if not doc:
+            raise NotFoundError("InvoiceDocument", str(doc_id))
+        linked_invoice = (
+            self.inv_repo.get_by_id(doc.invoice_id, company_id)
+            if doc.invoice_id
+            else None
+        )
+        return doc, linked_invoice
+
+
+class ListInvoiceDocumentsUseCase:
+    """List paginated uploaded invoice documents with filters."""
+
+    def __init__(self, db: Session) -> None:
+        self.doc_repo = InvoiceDocumentRepository(db)
+        self.inv_repo = InvoiceRepository(db)
+
+    def execute(
+        self,
+        company_id: UUID,
+        ocr_status: Optional[str] = None,
+        has_invoice: Optional[bool] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        docs, total = self.doc_repo.list_documents(
+            company_id=company_id,
+            ocr_status=ocr_status,
+            has_invoice=has_invoice,
+            limit=limit,
+            offset=offset,
+        )
+        items = []
+        for d in docs:
+            inv = self.inv_repo.get_by_id(d.invoice_id, company_id) if d.invoice_id else None
+            items.append({
+                "document": d,
+                "invoice": inv,
+            })
+        return items, total
+
+
+class GetInvoiceDocumentFileStreamUseCase:
+    """Fetch original source document file bytes directly by document ID with tenant validation."""
+
+    def __init__(self, db: Session, storage_service: Optional[StorageService] = None) -> None:
+        self.document_repo = InvoiceDocumentRepository(db)
+        self.storage = storage_service or LocalStorageService()
+
+    def execute(self, doc_id: UUID, company_id: UUID) -> Tuple[bytes, str, str]:
+        doc = self.document_repo.get_by_id(doc_id, company_id)
+        if not doc:
+            raise NotFoundError("InvoiceDocument", str(doc_id))
+        content = self.storage.get_file(doc.storage_key, company_id)
+        return content, doc.file_name, doc.mime_type
+
+
+class RetryInvoiceDocumentProcessingUseCase:
+    """Re-execute OCR extraction on an existing stored document without creating duplicate records."""
+
+    def __init__(
+        self,
+        db: Session,
+        storage_service: Optional[StorageService] = None,
+        ocr_provider: Optional[InvoiceOCRProvider] = None,
+    ) -> None:
+        self.db = db
+        self.doc_repo = InvoiceDocumentRepository(db)
+        self.inv_repo = InvoiceRepository(db)
+        self.cust_repo = CustomerRepository(db)
+        self.storage = storage_service or LocalStorageService()
+        self.ocr = ocr_provider or HeuristicInvoiceOCRProvider()
+
+    def execute(
+        self,
+        doc_id: UUID,
+        company_id: UUID,
+        auto_create_draft: bool = True,
+    ) -> Tuple[InvoiceDocument, ExtractedInvoiceData, Optional[Invoice]]:
+        doc = self.doc_repo.get_by_id(doc_id, company_id)
+        if not doc:
+            raise NotFoundError("InvoiceDocument", str(doc_id))
+
+        content = self.storage.get_file(doc.storage_key, company_id)
+        doc.start_processing()
+        doc.retry_count += 1
+        self.doc_repo.update(doc)
+
+        try:
+            extracted = self.ocr.extract_from_file(content, doc.file_name, doc.mime_type)
+            if extracted.is_ambiguous or extracted.confidence < Decimal("0.85"):
+                doc.mark_validation_required(extracted.model_dump(mode="json"))
+            else:
+                doc.mark_validated(extracted.model_dump(mode="json"))
+        except Exception as ex:
+            extracted = ExtractedInvoiceData(
+                confidence=Decimal("0.00"),
+                is_ambiguous=True,
+                extraction_notes=[f"Retry failed: {str(ex)}"],
+            )
+            doc.mark_ocr_failed(str(ex), is_retryable=False)
+
+        updated_doc = self.doc_repo.update(doc)
+
+        # Check existing linked draft invoice or create one
+        draft_inv: Optional[Invoice] = None
+        if updated_doc.invoice_id:
+            draft_inv = self.inv_repo.get_by_id(updated_doc.invoice_id, company_id)
+            if draft_inv and draft_inv.status == InvoiceStatus.DRAFT:
+                if extracted.total_amount:
+                    tot = Money(extracted.total_amount, currency=extracted.currency)
+                    draft_inv.total_amount = tot
+                    draft_inv.outstanding_amount = tot
+                    draft_inv.currency = extracted.currency
+                if extracted.invoice_number:
+                    draft_inv.invoice_number = extracted.invoice_number
+                if extracted.issue_date:
+                    draft_inv.issue_date = extracted.issue_date
+                if extracted.due_date:
+                    draft_inv.due_date = extracted.due_date
+                draft_inv = self.inv_repo.update(draft_inv)
+        elif auto_create_draft and extracted.invoice_number and extracted.total_amount:
+            existing_num = self.inv_repo.get_by_number(extracted.invoice_number, company_id)
+            if not existing_num:
+                resolved_cust: Optional[UUID] = None
+                if extracted.tax_id:
+                    matches, _ = self.cust_repo.search_customers(company_id=company_id, query_str=extracted.tax_id, limit=2)
+                    if len(matches) == 1:
+                        resolved_cust = matches[0].id
+                issue = extracted.issue_date or date.today()
+                due = extracted.due_date or issue
+                if due < issue:
+                    due = issue
+                tot = Money(extracted.total_amount, currency=extracted.currency)
+                draft = Invoice(
+                    id=uuid.uuid4(),
+                    company_id=company_id,
+                    customer_id=resolved_cust,
+                    document_id=updated_doc.id,
+                    invoice_number=extracted.invoice_number,
+                    issue_date=issue,
+                    due_date=due,
+                    total_amount=tot,
+                    paid_amount=Money.zero(extracted.currency),
+                    outstanding_amount=tot,
+                    currency=extracted.currency,
+                    status=InvoiceStatus.DRAFT,
+                    source=InvoiceSource.PDF_UPLOAD,
+                    notes=f"Auto-extracted on retry with confidence {extracted.confidence * 100:.0f}%",
+                )
+                draft_inv = self.inv_repo.create(draft)
+                self.doc_repo.link_to_invoice(updated_doc.id, draft_inv.id, company_id)
+
+        return updated_doc, extracted, draft_inv
+
+
+class CorrectInvoiceDocumentUseCase:
+    """Save human accountant corrections to extracted document fields."""
+
+    def __init__(self, db: Session) -> None:
+        self.doc_repo = InvoiceDocumentRepository(db)
+        self.inv_repo = InvoiceRepository(db)
+        self.cust_repo = CustomerRepository(db)
+
+    def execute(
+        self,
+        doc_id: UUID,
+        company_id: UUID,
+        invoice_number: Optional[str] = None,
+        customer_id: Optional[UUID] = None,
+        issue_date: Optional[date] = None,
+        due_date: Optional[date] = None,
+        total_amount: Optional[Decimal] = None,
+        tax_amount: Optional[Decimal] = None,
+        currency: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> InvoiceDocument:
+        doc = self.doc_repo.get_by_id(doc_id, company_id)
+        if not doc:
+            raise NotFoundError("InvoiceDocument", str(doc_id))
+
+        if customer_id:
+            cust = self.cust_repo.get_by_id(customer_id, company_id)
+            if not cust:
+                raise NotFoundError("Customer", str(customer_id))
+            if cust.is_archived:
+                raise ValidationError(f"Customer '{cust.name}' is archived.")
+
+        # Invariant checks
+        if issue_date and due_date and due_date < issue_date:
+            raise ValidationError(f"Due date ({due_date}) cannot precede issue date ({issue_date}).")
+        if total_amount is not None and total_amount <= Decimal("0.00"):
+            raise ValidationError("Total amount must be strictly positive.")
+
+        # Update document extracted_data
+        current_data = doc.extracted_data or {}
+        normalized = current_data.get("normalized", {})
+        if invoice_number is not None:
+            normalized["invoice_number"] = invoice_number.strip()
+        if customer_id is not None:
+            normalized["customer_id"] = str(customer_id)
+        if issue_date is not None:
+            normalized["issue_date"] = issue_date.isoformat()
+        if due_date is not None:
+            normalized["due_date"] = due_date.isoformat()
+        if total_amount is not None:
+            normalized["total_amount"] = str(total_amount)
+        if tax_amount is not None:
+            normalized["tax_amount"] = str(tax_amount)
+        if currency is not None:
+            normalized["currency"] = currency.strip().upper()
+
+        current_data["normalized"] = normalized
+        current_data["is_manually_corrected"] = True
+        doc.mark_manually_corrected(current_data)
+        updated_doc = self.doc_repo.update(doc)
+
+        # Sync linked draft invoice if exists
+        if doc.invoice_id:
+            inv = self.inv_repo.get_by_id(doc.invoice_id, company_id)
+            if inv and inv.status == InvoiceStatus.DRAFT:
+                if customer_id:
+                    inv.customer_id = customer_id
+                if invoice_number:
+                    inv.invoice_number = invoice_number.strip()
+                if issue_date:
+                    inv.issue_date = issue_date
+                if due_date:
+                    inv.due_date = due_date
+                if total_amount:
+                    tot = Money(total_amount, currency=currency or inv.currency)
+                    inv.total_amount = tot
+                    inv.outstanding_amount = tot
+                if currency:
+                    inv.currency = currency.strip().upper()
+                if notes:
+                    inv.notes = notes
+                self.inv_repo.update(inv)
+
+        return updated_doc
+
+
+class PromoteInvoiceDocumentUseCase:
+    """Promote document into an active operational PENDING invoice."""
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+        self.doc_repo = InvoiceDocumentRepository(db)
+        self.inv_repo = InvoiceRepository(db)
+        self.cust_repo = CustomerRepository(db)
+
+    def execute(
+        self,
+        doc_id: UUID,
+        company_id: UUID,
+        customer_id: UUID,
+        invoice_number: Optional[str] = None,
+        issue_date: Optional[date] = None,
+        due_date: Optional[date] = None,
+        total_amount: Optional[Decimal] = None,
+        tax_amount: Optional[Decimal] = None,
+        currency: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> Invoice:
+        doc = self.doc_repo.get_by_id(doc_id, company_id)
+        if not doc:
+            raise NotFoundError("InvoiceDocument", str(doc_id))
+
+        cust = self.cust_repo.get_by_id(customer_id, company_id)
+        if not cust:
+            raise NotFoundError("Customer", str(customer_id))
+        if cust.is_archived:
+            raise ValidationError(f"Customer '{cust.name}' is archived.")
+
+        # If already linked to a DRAFT invoice, promote draft
+        if doc.invoice_id:
+            inv = self.inv_repo.get_by_id(doc.invoice_id, company_id)
+            if inv:
+                if inv.status == InvoiceStatus.DRAFT:
+                    if invoice_number:
+                        inv_num = invoice_number.strip()
+                        if inv_num != inv.invoice_number:
+                            existing = self.inv_repo.get_by_number(inv_num, company_id)
+                            if existing and existing.id != inv.id:
+                                raise ConflictError(f"Invoice number '{inv_num}' already exists.")
+                            inv.invoice_number = inv_num
+                    curr = (currency or inv.currency).strip().upper()
+                    if total_amount is not None:
+                        tot = Money(total_amount, currency=curr)
+                        inv.total_amount = tot
+                        inv.outstanding_amount = tot
+                        inv.paid_amount = Money.zero(curr)
+                        inv.currency = curr
+                    if issue_date:
+                        inv.issue_date = issue_date
+                    if due_date:
+                        inv.due_date = due_date
+                    if tax_amount is not None:
+                        inv.tax_amount = Money(tax_amount, currency=curr)
+                    if notes:
+                        inv.notes = notes
+
+                    inv.publish_draft(customer_id)
+                    promoted = self.inv_repo.update(inv)
+                    doc.mark_validated(doc.extracted_data or {})
+                    self.doc_repo.update(doc)
+                    return promoted
+                elif inv.status in (InvoiceStatus.PENDING, InvoiceStatus.PARTIALLY_PAID, InvoiceStatus.PAID):
+                    return inv
+
+        # If no invoice exists, create a new PENDING invoice
+        extracted = doc.extracted_data or {}
+        norm = extracted.get("normalized", {})
+        inv_num = (invoice_number or norm.get("invoice_number") or f"INV-{uuid.uuid4().hex[:8].upper()}").strip()
+        existing = self.inv_repo.get_by_number(inv_num, company_id)
+        if existing:
+            raise ConflictError(f"Invoice number '{inv_num}' already exists.")
+
+        iss = issue_date or (date.fromisoformat(norm["issue_date"]) if norm.get("issue_date") else date.today())
+        due = due_date or (date.fromisoformat(norm["due_date"]) if norm.get("due_date") else iss)
+        if due < iss:
+            due = iss
+
+        tot_dec = total_amount or (Decimal(norm["total_amount"]) if norm.get("total_amount") else Decimal("1.00"))
+        curr = (currency or norm.get("currency") or "INR").strip().upper()
+        tot_money = Money(tot_dec, currency=curr)
+        tax_money = Money(tax_amount, currency=curr) if tax_amount is not None else None
+
+        new_invoice = Invoice(
+            id=uuid.uuid4(),
+            company_id=company_id,
+            customer_id=customer_id,
+            document_id=doc.id,
+            invoice_number=inv_num,
+            issue_date=iss,
+            due_date=due,
+            total_amount=tot_money,
+            paid_amount=Money.zero(curr),
+            outstanding_amount=tot_money,
+            tax_amount=tax_money,
+            currency=curr,
+            status=InvoiceStatus.PENDING,
+            source=InvoiceSource.PDF_UPLOAD,
+            notes=notes,
+        )
+        created = self.inv_repo.create(new_invoice)
+        doc.invoice_id = created.id
+        doc.mark_validated(doc.extracted_data or {})
+        self.doc_repo.update(doc)
+        return created
+
+
+class DeleteInvoiceDocumentUseCase:
+    """Safely delete unlinked or draft document and purge physical storage file."""
+
+    def __init__(self, db: Session, storage_service: Optional[StorageService] = None) -> None:
+        self.db = db
+        self.doc_repo = InvoiceDocumentRepository(db)
+        self.inv_repo = InvoiceRepository(db)
+        self.storage = storage_service or LocalStorageService()
+
+    def execute(self, doc_id: UUID, company_id: UUID) -> bool:
+        doc = self.doc_repo.get_by_id(doc_id, company_id)
+        if not doc:
+            raise NotFoundError("InvoiceDocument", str(doc_id))
+
+        if doc.invoice_id:
+            inv = self.inv_repo.get_by_id(doc.invoice_id, company_id)
+            if inv:
+                if not inv.paid_amount.is_zero():
+                    raise ValidationError("Cannot delete document linked to an invoice with recorded payments.")
+                if inv.status == InvoiceStatus.DRAFT:
+                    self.inv_repo.delete(inv.id, company_id)
+                elif inv.status in (InvoiceStatus.PENDING, InvoiceStatus.CANCELLED):
+                    inv.document_id = None
+                    self.inv_repo.update(inv)
+
+        # Purge physical file
+        self.storage.delete_file(doc.storage_key, company_id)
+        # Delete document record
+        return self.doc_repo.delete(doc_id, company_id)
+

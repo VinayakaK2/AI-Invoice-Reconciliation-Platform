@@ -62,7 +62,24 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 - [x] 105 automated unit, integration, and IDOR tenant security tests passing with 94% overall platform coverage (100% domain entities, 100% models, 100% schemas)
 - [x] Phase 11 Forensic Freeze Gate completed (`docs/phase-history/phase-11-invoice-management.md`)
 
-### Phase 12 — Payment & Bank Statement Management [VERIFIED & FROZEN]
+### Phase 12 — OCR & Document Processing [VERIFIED & FROZEN]
+- [x] Pure-Python magic byte detection (`%PDF-`, PNG `\x89PNG`, JPEG `\xff\xd8\xff`) and polyglot script/executable defense (`MZ`, `ELF`, shebang, `<script>`) (`app/modules/invoice/domain/file_security.py`)
+- [x] Pre-flight Content-Length check and chunked 64KB bounded streaming reader with early abort (`app/modules/invoice/presentation/upload_utils.py`)
+- [x] Deterministic financial parser with exact Decimal(14, 2) half-up rounding, Indian (lakhs/crores) and Western numbering, formula injection defense (CWE-1236) (`app/modules/invoice/domain/extraction_rules.py`)
+- [x] Canonical date parsing, temporal order check (`due_date >= issue_date`), and ambiguity detection (`DD/MM/YYYY` vs `MM/DD/YYYY`)
+- [x] Multi-signal identifier isolation: GSTIN, PAN extraction, PO number, and UTR separation preventing collision with invoice numbers
+- [x] Deterministic mathematical cross-validation (`subtotal + tax - discount + round_off ≈ total`) with zero silent corrections (Rule 20)
+- [x] Pluggable OCR provider boundary: Heuristic, Mock/Test, Cloud Vision Adapter, Multimodal AI Adapter, and Fallback Composite provider (`app/modules/invoice/application/ports.py`)
+- [x] 6-stage document processing pipeline (`app/modules/invoice/application/pipeline.py`)
+- [x] Expanded document state machine (`UPLOADED`, `PROCESSING`, `EXTRACTED`, `VALIDATED`, `VALIDATION_REQUIRED`, `FAILED`, `MANUALLY_CORRECTED`)
+- [x] Database migration (`0006_phase_12_ocr_documents.py`) adding `updated_at` and `idx_invoice_docs_company_status` index
+- [x] First-class document management REST endpoints under `/api/v1/invoices/documents` (list, detail, stream, retry, correct, promote, delete)
+- [x] Document streaming security headers (`X-Content-Type-Options: nosniff`, CSP `default-src 'none'`, `no-store`)
+- [x] Safe document deletion with payment protection (refuses deletion if linked invoice has recorded payments)
+- [x] 62 automated unit and integration tests passing with 90% invoice module coverage (293 total platform tests passing, 100% on pipeline)
+- [x] Phase 12 Verification & Audit completed (`docs/phase-history/phase-12-ocr-document-processing.md`)
+
+### Phase 13 — Payment & Bank Statement Management [VERIFIED & FROZEN]
 - [x] Strict domain boundary enforced: Raw Bank Transaction (credit/debit) != Payment (credit only) != Reconciliation Decision
 - [x] Domain entities: `ImportBatch`, `BankTransaction`, `Payment`, `TransactionFingerprint` (`app/modules/payment/domain/`)
 - [x] Exact balance conservation invariant: `allocated_amount + unallocated_amount == amount`
@@ -78,17 +95,77 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 - [x] 147 automated unit, integration, and IDOR tenant security tests passing with 93% total platform coverage
 - [x] Independent Security & Code Review Audit passed with 100% compliance (`docs/phase-history/phase-12-payment-ingestion.md`)
 
+### Phase 14.1 — Reconciliation Engine: Payment Intake [VERIFIED & FROZEN]
+- [x] Domain entities: `PaymentIntakeStatus` (ELIGIBLE, ALREADY_PROCESSED, INELIGIBLE, INVALID), `PaymentIntakeReasonCode`, `PaymentIntakeResult`, `PaymentIntakeRuleEngine` (`payment_intake.py`)
+- [x] Enriched `PaymentIntakeContext` with sub-balances (`allocated_amount`, `unallocated_amount`), status, transaction type, and `effective_amount` property
+- [x] Pure deterministic evaluation waterfall: gross amount check (>0), ISO 4217 currency validation, credit/debit transaction type, balance conservation check (`allocated + unallocated == amount`), temporal anomaly check, and accountant-ignored status
+- [x] Downstream integration: `PayerIdentificationRuleEngine` and `GenerateCandidateInvoicesUseCase` delegate intake validation and evaluate against `effective_amount` (unallocated balance)
+- [x] Application ports and use cases: `PaymentLookupPort.list_eligible_intake_contexts`, `IntakePaymentUseCase`, `BatchIntakePaymentUseCase`
+- [x] Infrastructure adapter: `SQLAlchemyPaymentLookupAdapter` with eager bank transaction join, metadata fallbacks, and sub-balance retrieval
+- [x] Presentation layer: `POST /api/v1/reconciliation/intake/{payment_id}`, `POST /api/v1/reconciliation/intake-batch`, sensitive bank coordinate masking
+- [x] Rule 4 Zero-Mutation Guarantee verified: SQLAlchemy dirty checking proves 0 dirty, 0 new, 0 deleted objects, and byte-for-byte pre/post database invariance
+- [x] Fail-closed IDOR security verified: cross-tenant access returns 404 Not Found (never revealing existence)
+- [x] 24 new automated tests across 3 test files passing (`test_payment_intake_rules.py`, `test_payment_intake_api.py`, `test_payment_intake_tenant_security.py`)
+- [x] Phase 14.1 verification and audit certification completed (`docs/phase-history/phase-14-1-payment-intake.md`)
+
+### Phase 14.2 — Reconciliation Engine: Customer Identification Foundation [VERIFIED & FROZEN]
+- [x] Domain entities: `IdentificationStatus`, `EvidenceType`, `SignalStrength`, `EvidenceSignal`, `CustomerMatchCandidate`, `CustomerIdentificationResult` (`app/modules/reconciliation/domain/`)
+- [x] Banking stopwords dictionary, payment aggregator handles, and corporate suffixes (`stopwords.py`)
+- [x] String normalizer with NFKD decomposition, diacritics stripping, and ReDoS-safe VPA/account extraction (`normalizer.py`)
+- [x] Deterministic rule waterfall: Direct coordinates (100.0), extracted narration coordinates (95.0), exact aliases (85.0), normalized legal name (75.0), clean payer name (70.0), reference match (50.0), narration token overlap (20.0-45.0) (`rules.py`)
+- [x] Conflict detection (different coordinates or coordinate vs explicit name) yielding `CONFLICTING`
+- [x] Ambiguity detection (score delta < 15.0 or shared accounts) yielding `AMBIGUOUS`
+- [x] Strict archived customer exclusion from matching catalog
+- [x] Application ports and use cases: `CustomerLookupPort`, `PaymentLookupPort`, `IdentifyPaymentCustomerUseCase`, `BatchIdentifyPaymentCustomersUseCase`
+- [x] SQLAlchemy lookup adapters with tenant scoping (`SQLAlchemyCustomerLookupAdapter`, `SQLAlchemyPaymentLookupAdapter`)
+- [x] Zero financial mutation guarantee: session dirty checking verifies 0 modified, 0 new, 0 deleted rows (0.00% financial mutation risk)
+- [x] REST API endpoints: `POST /api/v1/reconciliation/identify/{id}`, `POST /api/v1/reconciliation/identify-batch`, `GET /status`
+- [x] Sensitive coordinate masking in API responses (`********5544` and `jo******@icici`)
+- [x] 49 automated tests across 7 test files passing (206 total platform tests, 93% platform coverage)
+- [x] Phase 13.1 forensic freeze gate and audit certification completed (`docs/phase-history/phase-13-1-customer-identification.md`)
+
+### Phase 13.2 — Reconciliation Engine: Candidate Invoice Generation [IMPLEMENTED & VERIFIED]
+- [x] Domain entities: `CandidateInvoice`, `CandidateInvoiceEvidenceSignal`, `CandidateInvoiceUniverse`, `InvoiceEvidenceType` (`candidate_invoices.py`)
+- [x] Deterministic evidence taxonomy: `INVOICE_NUMBER_MATCH` (+40.0), `EXACT_AMOUNT_MATCH` (+35.0), `EXACT_ORIGINAL_AMOUNT_MATCH` (+25.0), `PARTIAL_AMOUNT_COMPATIBLE` (+15.0), `DATE_RELEVANCE` (up to +20.0 combining causality and due-date proximity)
+- [x] Micro-aging tie-breaker and 5-key deterministic sorting: `retrieval_priority` DESC, `is_exact_amount_match` DESC, `is_reference_match` DESC, `due_date` ASC (FIFO), `invoice_id` ASC
+- [x] Candidate bounding & truncation audit metadata: `total_eligible_invoices`, `truncated: bool`, `candidate_limit: int` (default 30, max 100), `truncation_reason`
+- [x] Strict currency isolation & mismatch diagnostics: `currency_mismatches_detected`, `status_code="CURRENCY_MISMATCH"`
+- [x] Application layer: `InvoiceCandidateContext`, `InvoiceLookupPort`, `GenerateCandidateInvoicesUseCase`
+- [x] Infrastructure adapter: `SQLAlchemyInvoiceLookupAdapter` leveraging existing Phase 11 composite indexes (`idx_invoices_company_customer`, `idx_invoices_company_status`, `idx_invoices_company_archived`) with zero new database migrations
+- [x] Presentation layer: `POST /api/v1/reconciliation/candidates/{payment_id}` with optional `override_customer_id` and `limit`, fail-closed 404 IDOR protection
+- [x] Absolute zero financial state mutation verified across 100% of test runs
+- [x] 25 automated tests across 4 test files passing: `test_candidate_invoice_entities.py` (7), `test_candidate_invoice_rules.py` (11), `test_candidate_invoice_api.py` (6), `test_candidate_invoice_performance.py` (1)
+- [x] Full platform regression suite: 231 tests passing (100%), 0 failures, 93% total platform statement coverage across 4,418 statements
+- [x] Phase 14.3 verification and phase history completed (`docs/phase-history/phase-14-3-candidate-invoice-generation.md`)
+
+### Phase 14.4 — Reconciliation Engine: Candidate Filtering [VERIFIED & FROZEN]
+- [x] Domain entities: `FilterExclusionReason` (18-code taxonomy), `CandidateFilterCriteria`, `ExcludedCandidateInvoice`, `FilteredCandidateUniverse`, `CandidateFilterRuleEngine` (`candidate_filters.py`)
+- [x] 11-Gate fail-closed waterfall pipeline: Tenant check, customer check, customer archival, invoice archival, currency check, invoice status, balance conservation & non-negative check, amount policy bounds, date/temporal causality & lookback window, reference match constraints, and stream deduplication
+- [x] 5-Key deterministic comparator prior to bounding: `retrieval_priority` DESC, `is_exact_amount_match` DESC, `is_reference_match` DESC, `due_date` ASC (FIFO), `invoice_id` ASC
+- [x] Permutation invariance verified: identical retained set and ranks 1..K across 100 randomized shuffles
+- [x] Fast candidate pruning adapter: `CandidateFilterRuleEngine.filter_contexts` for in-memory and database pre-filtering
+- [x] Application layer: `FilterCandidateInvoicesUseCase` in `app/modules/reconciliation/application/use_cases.py`
+- [x] Presentation layer: `POST /api/v1/reconciliation/candidates/{payment_id}/filtered` with criteria parameters, Bearer auth, and fail-closed 404 IDOR defense
+- [x] Zero financial state mutation guarantee verified: 0 dirty, 0 new, 0 deleted SQLAlchemy objects (`len(db.dirty) == 0`) across repeated calls
+- [x] 31 automated tests across 4 test files passing: `test_candidate_filtering_rules.py` (13), `test_candidate_filtering_api.py` (4), `test_candidate_filtering_tenant_security.py` (4), `test_candidate_filtering_adversarial.py` (10)
+- [x] Full platform regression suite: 348 tests passing (100%), 0 failures, 93% total platform statement coverage across 5,737 statements
+- [x] Phase 14.4 forensic verification and phase history completed (`docs/phase-history/phase-14-4-candidate-filtering.md`)
+
 ---
 
 ## Disambiguation Rules:
-1. **Reconciliation is Phase 14**, NOT Phase 8. Phase 8 is strictly the Engineering Foundation.
-2. **`match_score`**: Deterministic heuristic evidence score (0–100), not a statistical probability.
+1. **Reconciliation Engine Sub-Phases**: Phase 14.1 (Payment Intake), Phase 14.2 (Payer Identification), Phase 14.3 (Candidate Invoice Generation), Phase 14.4 (Candidate Filtering), Phase 14.5 (Exact Matching), Phase 14.6 (Partial Matching), Phase 14.7 (Multi-Invoice Matching).
+2. **`retrieval_priority` vs `match_score`**: `retrieval_priority` (0–100) is a candidate presentation heuristic; authoritative matching `match_score` belongs to Phase 14.5+.
 3. **`AUTO_ELIGIBLE`**: High evidence score qualification for expedited human review. NOT `AUTO_APPLIED`.
-4. **Combinatorial Search Bounds**: Initial engineering policies subject to empirical benchmark validation.
+4. **Zero LLM Authority**: Deterministic rules decide. AI assists text extraction only. Humans resolve uncertainty.
 
 ---
 
 ## Up Next:
-- **Phase 13**: Advanced OCR & Multi-Vendor Processing (Cloud provider adapters, table extraction).
-- **Phase 14**: Reconciliation Engine (Deterministic matching, scoring, evidence generation).
-- **Phase 15**: Review Center (Interactive human review, approval/rejection workflows).
+- **Phase 14.5**: Exact Matching (1:1) Engine (deterministic 1:1 invoice matching, high-confidence criteria, auto-reconciliation proposals).
+- **Phase 14.6**: Partial Matching Engine (payment < invoice outstanding balance, remainder tracking).
+- **Phase 14.7**: Multi-Invoice Matching Engine (subset-sum combinatorial search, 1:N payment allocation).
+- **Phase 15**: Human Review & Exception Workflows.
+- **Phase 16**: Review Center UI & Frontend Integration.
+
+

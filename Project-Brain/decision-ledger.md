@@ -115,3 +115,60 @@ This ledger documents the frozen architectural decisions made for the platform.
   6. **Append-Only Migration**:
      - Tables `import_batches`, `bank_transactions`, and `payments` are established via append-only migration `0005_phase_12_payments.py` chained from `0004_phase_11_archive`.
 - **Consequences**: Rock-solid financial invariant guarantees, zero credit/debit pollution, partial import resilience, automated deduplication across overlapping files, complete multi-tenant IDOR protection, verified against 10 special forensic tests (157 total tests passed, 93% platform coverage), and a clean ingestion substrate for Phase 14 Reconciliation Engine.
+
+---
+
+## ADR-010: Counterparty Payer Identification Architecture & Deterministic Rule Waterfall
+- **Date**: 2026-09-07
+- **Status**: Accepted / Frozen
+- **Context**: The reconciliation engine must accurately identify the customer context of incoming bank statement payments before candidate invoices can be fetched or matched. Bank statement narrations vary widely: direct accounts, UPI VPAs, abbreviations, corporate suffix variations, and shared accounts. The system must disambiguate counterparties with 100% auditable deterministic evidence, zero LLM guesswork, and zero mutation of financial state.
+- **Decision**:
+  1. **Strict Counterparty Scope**: Phase 13.1 implements only Counterparty Disambiguation / Customer Identification. Candidate invoice generation, combination searches, subset-sum matching, and payment allocations are strictly deferred to subsequent sub-phases.
+  2. **Stateless & Recomputable**: Evaluation runs on-demand against active customer lookup contexts via ports and adapters without requiring premature reconciliation database tables or migrations.
+  3. **Deterministic Rule Waterfall & Scoring**:
+     - Direct Coordinate Matches (`EXACT_BANK_ACCOUNT`, `EXACT_UPI_VPA`, `EXACT_VIRTUAL_ACCOUNT`) yield weight 100.0.
+     - Extracted Narration Coordinates yield weight 95.0.
+     - Exact Registered Alias Matches yield weight 85.0.
+     - Normalized Legal Name Matches (with standard corporate suffix stripping) yield weight 75.0 while strictly preventing false collapses (e.g., `Industries` != `Industrials`).
+     - Clean Payer Name Exact Matches yield weight 70.0.
+     - Reference / Tax ID Matches yield weight 50.0 (excluding placeholder tokens such as `NA`, `NONE`, `PENDING`).
+     - Narration Token Overlap yields weight 20.0 to 45.0 (only as fallback when exact name/coordinate does not match).
+  4. **Conflict & Ambiguity Detection**:
+     - Conflicting direct coordinates across different candidates trigger `CONFLICTING`.
+     - Direct coordinate on Customer A vs explicit name/alias on Customer B triggers `CONFLICTING` (Conflict 2: hardened for all scores $\ge 70.0$).
+     - Shared bank accounts (two subsidiaries with the same account coordinate) trigger `AMBIGUOUS`.
+     - Candidate score deltas $\Delta < 15.00$ or top score $< 70.00$ trigger `AMBIGUOUS`.
+     - No evidence or score $< 30.00$ triggers `UNKNOWN`.
+     - Non-positive payments trigger `NOT_ELIGIBLE`.
+  5. **Archived Customer Exclusion**: Archived customers are strictly excluded from candidate consideration.
+  6. **Zero Financial State Mutation Guarantees**: Customer identification does not mutate payment or invoice balances; session dirty checking confirms 0 modified, 0 new, and 0 deleted rows (**Financial State Mutation Risk: 0%**). Crucially, **Customer Identification Correctness Risk** remains non-zero: deterministic heuristics can still make incorrect counterparty interpretations when data is incomplete or ambiguous, mandating human review gates.
+  7. **Multi-Tenancy & Data Protection**: `company_id` is enforced strictly from `current_user` in JWT with fail-closed HTTP 404 on IDOR attempts. Banking coordinates and UPI VPAs are masked (`********5544` and `jo******@icici`) in API responses.
+  8. **Scalability Classification & Boundaries**: Categorized as **Category B: ACCEPTABLE WITH DOCUMENTED LIMITATION**. Certified for catalogs up to $C \le 1,000$ active customers per tenant where $O(P \times C)$ in-memory evaluation remains $\le 135\text{ ms}$. Future query and pre-filtering architectures for larger catalogs must be empirically proven in Phase 13.2+ based on concrete invoice matching requirements rather than assumed prematurely.
+  9. **Documented Semantic Debt (Tax ID vs Reference Conflation)**: Matching a payment reference to a customer tax ID is temporarily grouped under `REFERENCE_MATCH` (weight 50.0). Phase 13.2+ must not build higher-order matching logic on this conflated assumption and must separate strong enterprise tax coordinates (e.g. GSTIN) from generic reference substrings.
+- **Consequences**: Deterministic, explainable, and reproducible counterparty identification with 49 automated reconciliation tests (206 total platform tests passing, 93% platform coverage), establishing an audited, bounded substrate for Phase 13.2+ candidate invoice matching.
+
+## ADR-011: Candidate Invoice Generation & Bounded Universe Architecture
+- **Date**: 2026-09-07
+- **Status**: Accepted / Implemented
+- **Context**: Given an incoming payment and its Phase 13.1 counterparty customer identification result (or an explicit user override), the reconciliation engine must retrieve, rank, and prune open invoices belonging to that customer. Enterprise customers can accumulate hundreds of unpaid invoices. Unbounded subset-sum matching on hundreds of invoices causes combinatorial explosion ($O(2^N)$). Furthermore, candidate generation must not mutate financial balances, must not rely on LLM guessing, and must strictly isolate currency boundaries.
+- **Decision**:
+  1. **Strict Candidate Scope**: Phase 13.2 implements only Candidate Invoice Generation. Final invoice matching (1:1, 1:N, N:1), combination subset searches, and payment allocation are strictly deferred to Phase 13.3+.
+  2. **Retrieval Priority vs Reconciliation Confidence Separation**: The `retrieval_priority` (0.0 to 100.0) computed in Phase 13.2 is an ordering heuristic solely for candidate presentation and universe bounding ($K \le 30$). It is explicitly **not** a reconciliation match confidence score.
+  3. **Zero Financial State Mutation**: Evaluation is strictly read-only. Database session assertions confirm 0 modified, 0 new, and 0 deleted rows (Financial State Mutation Risk: 0.00%).
+  4. **Dedicated Application Port (`InvoiceLookupPort`)**: Clean Architecture boundary prevents leaking ORM dependencies into the domain. Implemented via `SQLAlchemyInvoiceLookupAdapter` leveraging existing Phase 11 composite indexes (`idx_invoices_company_customer`, `idx_invoices_company_status`, `idx_invoices_company_archived`). Zero new database migrations required.
+  5. **Deterministic Evidence Taxonomy**:
+     - `INVOICE_NUMBER_MATCH` (+40.0, Strong): Clean alphanumeric regex token match against payment narration or payment reference.
+     - `EXACT_AMOUNT_MATCH` (+35.0, Strong): Exact `Decimal` equality between payment amount and invoice outstanding balance.
+     - `EXACT_ORIGINAL_AMOUNT_MATCH` (+25.0, Medium): Payment amount equals gross total on a previously partially paid invoice.
+     - `PARTIAL_AMOUNT_COMPATIBLE` (+15.0, Medium): Payment amount is strictly less than invoice outstanding balance.
+     - `DATE_RELEVANCE` (Up to +20.0): Temporal causality (`issue_date <= payment_date`, +10.0) plus due-date proximity ($\le 7$ days: +10.0, $\le 30$ days: +5.0, $> 30$ days: +2.0).
+  6. **5-Key Deterministic Sorting**:
+     Candidates are sorted by: (1) `retrieval_priority` DESC (with micro-aging tie-breaker $\min(0.99, \text{days\_overdue}/1000)$ favoring older unpaid debt FIFO), (2) `is_exact_amount_match` DESC, (3) `is_reference_match` DESC, (4) `due_date` ASC, (5) `invoice_id` ASC.
+  7. **Strict Currency Invariants**:
+     Invoices with mismatched currencies are excluded. If a customer has open invoices in another currency, `CURRENCY_MISMATCH` is returned with explicit truncation diagnostics.
+  8. **Bounded Universe & Truncation Metadata**:
+     Candidate lists are clamped to limit ($K=30$ default, max 100). Truncation metadata records `total_eligible_invoices`, `truncated: bool`, `candidate_limit: int`, and `truncation_reason`.
+  9. **Fail-Closed IDOR Security**:
+     `POST /api/v1/reconciliation/candidates/{payment_id}` enforces JWT company context; cross-tenant payment requests fail-closed with HTTP 404.
+- **Consequences**: 25 new tests added (74 total reconciliation tests, 231 total platform tests passing, 93% platform coverage). Delivers a deterministic, bounded, and audited candidate pool ready for Phase 13.3 combinatorial matching.
+

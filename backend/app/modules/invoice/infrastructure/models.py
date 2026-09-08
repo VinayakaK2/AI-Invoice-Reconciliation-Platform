@@ -52,9 +52,16 @@ class InvoiceDocumentModel(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     __table_args__ = (
         Index("idx_invoice_docs_company_hash", "company_id", "file_hash"),
+        Index("idx_invoice_docs_company_status", "company_id", "ocr_status"),
     )
 
 
