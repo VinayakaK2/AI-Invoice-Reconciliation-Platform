@@ -124,7 +124,7 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 - [x] 49 automated tests across 7 test files passing (206 total platform tests, 93% platform coverage)
 - [x] Phase 13.1 forensic freeze gate and audit certification completed (`docs/phase-history/phase-13-1-customer-identification.md`)
 
-### Phase 13.2 — Reconciliation Engine: Candidate Invoice Generation [IMPLEMENTED & VERIFIED]
+### Phase 14.3 — Reconciliation Engine: Candidate Invoice Generation [IMPLEMENTED & VERIFIED]
 - [x] Domain entities: `CandidateInvoice`, `CandidateInvoiceEvidenceSignal`, `CandidateInvoiceUniverse`, `InvoiceEvidenceType` (`candidate_invoices.py`)
 - [x] Deterministic evidence taxonomy: `INVOICE_NUMBER_MATCH` (+40.0), `EXACT_AMOUNT_MATCH` (+35.0), `EXACT_ORIGINAL_AMOUNT_MATCH` (+25.0), `PARTIAL_AMOUNT_COMPATIBLE` (+15.0), `DATE_RELEVANCE` (up to +20.0 combining causality and due-date proximity)
 - [x] Micro-aging tie-breaker and 5-key deterministic sorting: `retrieval_priority` DESC, `is_exact_amount_match` DESC, `is_reference_match` DESC, `due_date` ASC (FIFO), `invoice_id` ASC
@@ -151,20 +151,63 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 - [x] Full platform regression suite: 348 tests passing (100%), 0 failures, 93% total platform statement coverage across 5,737 statements
 - [x] Phase 14.4 forensic verification and phase history completed (`docs/phase-history/phase-14-4-candidate-filtering.md`)
 
+### Phase 14.5 — Reconciliation Engine: Exact Matching (1:1) [VERIFIED & FROZEN]
+- [x] Domain entities: `ExactMatchStatus` (EXACT_MATCH, NO_EXACT_MATCH, AMBIGUOUS_EXACT_MATCH), `ExactMatchReasonCode` (14-code taxonomy), `ExactMatchEvidenceType`, `ExactMatchEvidenceSignal`, `ExactMatchCriteria`, `ExactMatchHypothesis`, `ExactMatchResult` (`exact_matching.py`)
+- [x] Authoritative balance comparison invariant: strictly compares `payment.effective_amount == candidate.outstanding_amount` with identical ISO currency validation
+- [x] 4-Key deterministic non-scoring comparator sorting: `(not is_reference_match, date_difference_days, invoice_number, invoice_id)` with verified 100-run permutation invariance
+- [x] Ambiguity preservation (Prohibition of autonomous tie-breaking): In accordance with `business-rules.md` §2.5 line 64, equal amount candidates unconditionally emit `AMBIGUOUS_EXACT_MATCH` with `matched_candidate = None` and `competing_candidates` populated. Reference match signals are retained for human review.
+- [x] Incomplete universe truncation awareness: detects `TRUNCATED_UNIVERSE_AMBIGUITY` when candidate universe is truncated and single exact match lacks explicit narration reference match
+- [x] Truncated exclusion collision detection: checks Phase 14.4 `universe.excluded_candidates` for amount collisions under `TRUNCATED_BY_LIMIT`
+- [x] Application layer: `ExactMatchUseCase` (single payment evaluation via Phase 14.4 candidate universe with fail-closed IDOR protection) and `BatchExactMatchUseCase` (batch up to 100 payments within tenant boundary)
+- [x] Presentation layer: `POST /api/v1/reconciliation/exact-match/{payment_id}` and `POST /api/v1/reconciliation/exact-match-batch` with JWT auth, tenant scoping, and full response envelope
+- [x] Zero financial state mutation guarantee verified: 0 dirty, 0 new, 0 deleted SQLAlchemy objects (`len(db.dirty) == 0`) across single, batch, and repeated runs
+- [x] 32 automated tests across 4 test files passing: `test_exact_matching_rules.py` (18), `test_exact_matching_api.py` (6), `test_exact_matching_tenant_security.py` (4), `test_exact_matching_adversarial.py` (4)
+- [x] Full platform regression suite: 388 tests passing (100%), 0 failures, 85.73s runtime, 0 warnings
+- [x] Phase 14.5 forensic verification, B-01/B-02 remediation, and phase history completed (`docs/phase-history/phase-14-5-exact-matching.md`)
+
+---
+
+### Phase 14.6 — Reconciliation Engine: Partial Payment Matching (1:1) [FROZEN]
+- [x] Domain layer: `PartialMatchRuleEngine`, `PartialMatchHypothesis`, `PartialMatchResult`, `PartialMatchCriteria`, `PartialMatchEvidenceSignal`, `PartialMatchStatus`, `PartialMatchReasonCode`
+- [x] Strict Decimal financial arithmetic: evaluates $0 < \text{payment.effective\_amount} < \text{candidate.outstanding\_amount}$ using authoritative outstanding amounts
+- [x] Strict Ambiguity Preservation: multiple candidates with balance > payment emit `AMBIGUOUS_PARTIAL_MATCH` (`MULTIPLE_PARTIAL_CANDIDATES`) without arbitrary tie-breaking
+- [x] Single-invoice scope: evaluates candidates individually; multi-invoice combination matching strictly deferred to Phase 14.7
+- [x] Exact match non-interference: exact amount payments emit `NO_PARTIAL_MATCH` with reason `EXACT_MATCH_DETECTED` (governed by Phase 14.5)
+- [x] Truncation ambiguity defense: detects when candidate universe truncation creates ambiguity risk from unretrieved candidates
+- [x] Application layer: `PartialMatchUseCase` and `BatchPartialMatchUseCase` with fail-closed IDOR security
+- [x] Presentation layer: `POST /api/v1/reconciliation/partial-match/{payment_id}` and `POST /api/v1/reconciliation/partial-match-batch`
+- [x] Zero financial state mutation guarantee: verified `len(db.dirty) == 0` across single, batch, and repeated runs
+- [x] 32 automated tests across 4 test files passing: `test_partial_matching_rules.py` (18), `test_partial_matching_api.py` (6), `test_partial_matching_tenant_security.py` (4), `test_partial_matching_adversarial.py` (4)
+- [x] Full platform regression suite: 420 tests passing (100%), 0 failures, 91.04s runtime
+- [x] Phase 14.6 phase history and freeze certification completed (`docs/phase-history/phase-14-6-partial-matching.md`)
+
+### Phase 14.7 — Reconciliation Engine: Multi-Invoice Matching (1:N) [FROZEN]
+- [x] Domain layer: `MultiInvoiceMatchRuleEngine`, `MultiInvoiceMatchHypothesis`, `MultiInvoiceMatchResult`, `MultiInvoiceMatchCriteria`, `MultiInvoiceMatchEvidenceSignal`, `MultiInvoiceMatchStatus`, `MultiInvoiceMatchReasonCode`
+- [x] Strict Decimal financial arithmetic: evaluates $\sum_{i=1}^k \text{candidate}_i\text{.outstanding\_amount} == \text{payment.effective\_amount}$ ($2 \le k \le 4$) using authoritative outstanding amounts
+- [x] Strict Ambiguity Preservation: multiple distinct subsets/combinations summing to payment emit `AMBIGUOUS_MULTI_INVOICE_MATCH` (`MULTIPLE_MULTI_INVOICE_MATCHES`) without arbitrary tie-breaking
+- [x] Multi-invoice scope (1:N): evaluates combinations of $k \ge 2$; single-invoice exact ($k=1$) diagnosed as `EXACT_MATCH_DETECTED` (Phase 14.5), single-invoice partial ($k=1$) diagnosed as `PARTIAL_MATCH_DETECTED` (Phase 14.6)
+- [x] Combinatorial complexity bounding: enforced $2 \le k \le \text{max\_combination\_size} \le 10$ (default $k \le 4$) over candidate universe ($n \le 30$)
+- [x] Truncation ambiguity defense: detects `TRUNCATED_UNIVERSE_AMBIGUITY` when candidate universe is truncated and not all invoices in match combination have explicit reference matches
+- [x] Application layer: `MultiInvoiceMatchUseCase` and `BatchMultiInvoiceMatchUseCase` with fail-closed IDOR security
+- [x] Presentation layer: `POST /api/v1/reconciliation/multi-invoice-match/{payment_id}` and `POST /api/v1/reconciliation/multi-invoice-match-batch`
+- [x] Zero financial state mutation guarantee: verified `len(db.dirty) == 0` across single, batch, and repeated runs
+- [x] 33 automated tests across 4 test files passing: `test_multi_invoice_matching_rules.py` (19), `test_multi_invoice_matching_api.py` (6), `test_multi_invoice_matching_tenant_security.py` (4), `test_multi_invoice_matching_adversarial.py` (4)
+- [x] Full platform regression suite: 453 tests passing (100%), 0 failures, 137.07s runtime
+- [x] Phase 14.7 phase history and freeze certification completed (`docs/phase-history/phase-14-7-multi-invoice-matching.md`)
+
 ---
 
 ## Disambiguation Rules:
-1. **Reconciliation Engine Sub-Phases**: Phase 14.1 (Payment Intake), Phase 14.2 (Payer Identification), Phase 14.3 (Candidate Invoice Generation), Phase 14.4 (Candidate Filtering), Phase 14.5 (Exact Matching), Phase 14.6 (Partial Matching), Phase 14.7 (Multi-Invoice Matching).
-2. **`retrieval_priority` vs `match_score`**: `retrieval_priority` (0–100) is a candidate presentation heuristic; authoritative matching `match_score` belongs to Phase 14.5+.
+1. **Reconciliation Engine Sub-Phases**: Phase 14.1 (Payment Intake), Phase 14.2 (Payer Identification), Phase 14.3 (Candidate Invoice Generation), Phase 14.4 (Candidate Filtering), Phase 14.5 (Exact Matching), Phase 14.6 (Partial Matching), Phase 14.7 (Multi-Invoice Matching), Phase 14.8 (Combination Matching).
+2. **`retrieval_priority` vs Candidate Scoring**: `retrieval_priority` (0–100) is a Phase 14.3 candidate presentation heuristic; composite candidate scoring (`match_score`) belongs strictly to Phase 14.11. Phases 14.5, 14.6, and 14.7 produce factual matching signals only.
 3. **`AUTO_ELIGIBLE`**: High evidence score qualification for expedited human review. NOT `AUTO_APPLIED`.
 4. **Zero LLM Authority**: Deterministic rules decide. AI assists text extraction only. Humans resolve uncertainty.
 
 ---
 
 ## Up Next:
-- **Phase 14.5**: Exact Matching (1:1) Engine (deterministic 1:1 invoice matching, high-confidence criteria, auto-reconciliation proposals).
-- **Phase 14.6**: Partial Matching Engine (payment < invoice outstanding balance, remainder tracking).
-- **Phase 14.7**: Multi-Invoice Matching Engine (subset-sum combinatorial search, 1:N payment allocation).
+- **Phase 14.8**: Combination Matching Engine (competing subset evaluation across multiple candidate invoices, FIFO aging heuristics / Rule M-3, bounded candidate resolution).
+- **Phase 14.9–14.13**: Evidence Collection & Normalization (14.9–14.10), Confidence Scoring (14.11), Decision Engine (14.12), Payment Allocation (14.13). Note: Generalized M:N (Many Payments to Many Invoices) is deferred to future post-core roadmap.
 - **Phase 15**: Human Review & Exception Workflows.
 - **Phase 16**: Review Center UI & Frontend Integration.
 

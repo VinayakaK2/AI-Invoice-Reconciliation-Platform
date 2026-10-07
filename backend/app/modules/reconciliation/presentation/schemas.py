@@ -251,3 +251,270 @@ class BatchPaymentIntakeResponse(BaseModel):
     total_eligible: int
 
 
+class ExactMatchCriteriaRequest(BaseModel):
+    """Optional configuration for exact match evaluation."""
+
+    amount_tolerance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0.00"))
+    require_exact_currency: bool = True
+    date_proximity_days: int = Field(default=30, ge=0)
+
+
+class ExactMatchRequest(BaseModel):
+    """Request payload for exact 1:1 match evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    criteria: Optional[ExactMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class ExactMatchEvidenceSignalResponse(BaseModel):
+    """Presentation DTO for an evidence signal supporting exact match."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    evidence_type: str
+    signal_strength: str
+    description: str
+    matched_value: str
+    source_field: str
+    weight: float
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExactMatchHypothesisResponse(BaseModel):
+    """Presentation DTO for a proposed 1:1 match hypothesis."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_id: UUID
+    invoice_number: str
+    matched_amount: str
+    invoice_outstanding_before: str
+    invoice_outstanding_after: str
+    payment_unallocated_before: str
+    payment_unallocated_after: str
+    currency: str
+    match_type: str
+    is_reference_match: bool
+    date_difference_days: int
+    evidence_signals: List[ExactMatchEvidenceSignalResponse] = Field(default_factory=list)
+
+
+class ExactMatchResponse(BaseModel):
+    """Presentation DTO for exact 1:1 matching evaluation outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    customer_id: Optional[UUID] = None
+    status: str
+    matched_candidate: Optional[ExactMatchHypothesisResponse] = None
+    competing_candidates: List[ExactMatchHypothesisResponse] = Field(default_factory=list)
+    total_exact_candidates_found: int
+    reason_code: str
+    reason_description: str
+    is_universe_truncated: bool
+    candidate_count_evaluated: int
+    is_deterministic: bool
+    evaluated_at: str
+
+
+class BatchExactMatchRequest(BaseModel):
+    """Request payload for batch exact matching evaluation."""
+
+    payment_ids: Optional[List[UUID]] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    criteria: Optional[ExactMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class BatchExactMatchResponse(BaseModel):
+    """Presentation response for batch exact matching evaluation."""
+
+    results: List[ExactMatchResponse]
+    total_evaluated: int
+    exact_matches_found: int
+    ambiguous_matches_found: int
+    no_matches_found: int
+
+
+class PartialMatchCriteriaRequest(BaseModel):
+    """Optional configuration for partial match evaluation."""
+
+    amount_tolerance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0.00"))
+    require_exact_currency: bool = True
+    date_proximity_days: int = Field(default=30, ge=0)
+
+
+class PartialMatchRequest(BaseModel):
+    """Request payload for partial 1:1 match evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    criteria: Optional[PartialMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class PartialMatchEvidenceSignalResponse(BaseModel):
+    """Presentation DTO for an evidence signal supporting partial match."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    evidence_type: str
+    signal_strength: str
+    description: str
+    matched_value: str
+    source_field: str
+    weight: float
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PartialMatchHypothesisResponse(BaseModel):
+    """Presentation DTO for a proposed partial 1:1 match hypothesis."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_id: UUID
+    invoice_number: str
+    matched_amount: str
+    invoice_outstanding_before: str
+    invoice_outstanding_after: str
+    payment_unallocated_before: str
+    payment_unallocated_after: str
+    currency: str
+    match_type: str
+    is_reference_match: bool
+    date_difference_days: int
+    evidence_signals: List[PartialMatchEvidenceSignalResponse] = Field(default_factory=list)
+
+
+class PartialMatchResponse(BaseModel):
+    """Presentation DTO for partial 1:1 matching evaluation outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    customer_id: Optional[UUID] = None
+    status: str
+    matched_candidate: Optional[PartialMatchHypothesisResponse] = None
+    competing_candidates: List[PartialMatchHypothesisResponse] = Field(default_factory=list)
+    total_partial_candidates_found: int
+    reason_code: str
+    reason_description: str
+    is_universe_truncated: bool
+    candidate_count_evaluated: int
+    is_deterministic: bool
+    evaluated_at: str
+
+
+class BatchPartialMatchRequest(BaseModel):
+    """Request payload for batch partial matching evaluation."""
+
+    payment_ids: Optional[List[UUID]] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    criteria: Optional[PartialMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class BatchPartialMatchResponse(BaseModel):
+    """Presentation response for batch partial matching evaluation."""
+
+    results: List[PartialMatchResponse]
+    total_evaluated: int
+    partial_matches_found: int
+    ambiguous_matches_found: int
+    no_matches_found: int
+
+
+class MultiInvoiceMatchCriteriaRequest(BaseModel):
+    """Optional configuration for multi-invoice match evaluation."""
+
+    max_combination_size: int = Field(default=4, ge=2, le=4)
+    amount_tolerance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0.00"))
+    require_exact_currency: bool = True
+    date_proximity_days: int = Field(default=30, ge=0)
+
+
+class MultiInvoiceMatchRequest(BaseModel):
+    """Request payload for multi-invoice match evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    criteria: Optional[MultiInvoiceMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class MultiInvoiceMatchEvidenceSignalResponse(BaseModel):
+    """Presentation DTO for an evidence signal supporting a multi-invoice match."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    evidence_type: str
+    signal_strength: str
+    description: str
+    matched_value: str
+    source_field: str
+    weight: float
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MultiInvoiceMatchHypothesisResponse(BaseModel):
+    """Presentation DTO for a proposed multi-invoice match hypothesis (1:N)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_ids: List[UUID]
+    invoice_numbers: List[str]
+    matched_amount: str
+    invoices_outstanding_before: List[str]
+    invoices_outstanding_after: List[str]
+    payment_unallocated_before: str
+    payment_unallocated_after: str
+    currency: str
+    match_type: str
+    combination_size: int
+    has_reference_match: bool
+    matched_reference_count: int
+    max_date_difference_days: int
+    evidence_signals: List[MultiInvoiceMatchEvidenceSignalResponse] = Field(default_factory=list)
+
+
+class MultiInvoiceMatchResponse(BaseModel):
+    """Presentation DTO for multi-invoice matching evaluation outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    customer_id: Optional[UUID] = None
+    status: str
+    matched_combination: Optional[MultiInvoiceMatchHypothesisResponse] = None
+    competing_combinations: List[MultiInvoiceMatchHypothesisResponse] = Field(default_factory=list)
+    total_combinations_found: int
+    reason_code: str
+    reason_description: str
+    is_universe_truncated: bool
+    candidate_count_evaluated: int
+    is_deterministic: bool
+    evaluated_at: str
+
+
+class BatchMultiInvoiceMatchRequest(BaseModel):
+    """Request payload for batch multi-invoice matching evaluation."""
+
+    payment_ids: Optional[List[UUID]] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    criteria: Optional[MultiInvoiceMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class BatchMultiInvoiceMatchResponse(BaseModel):
+    """Presentation response for batch multi-invoice matching evaluation."""
+
+    results: List[MultiInvoiceMatchResponse]
+    total_evaluated: int
+    multi_invoice_matches_found: int
+    ambiguous_matches_found: int
+    no_matches_found: int
+
+
