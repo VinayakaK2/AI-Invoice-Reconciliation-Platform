@@ -621,3 +621,77 @@ class BatchCombinationMatchResponse(BaseModel):
     no_matches_found: int
 
 
+# ==============================================================================
+# Phase 14.9 Evidence Collection Presentation Schemas
+# ==============================================================================
+
+
+class StructuredEvidenceItemResponse(BaseModel):
+    """Presentation DTO for an atomic structured evidence item."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    evidence_type: str
+    classification: str
+    source_field: str
+    observed_result: str
+    description: str
+    target_entity: str
+    matched_value: Optional[str] = None
+    expected_value: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CandidateEvidenceBundleResponse(BaseModel):
+    """Presentation DTO for a candidate invoice's evidence bundle."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_id: UUID
+    invoice_number: str
+    items: List[StructuredEvidenceItemResponse]
+    has_conflicting_evidence: bool
+    direct_evidence_count: int
+    supporting_evidence_count: int
+    missing_evidence_count: int
+    conflicting_evidence_count: int
+
+
+class PaymentEvidenceContextResponse(BaseModel):
+    """Presentation DTO for payment-level evidence facts."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    items: List[StructuredEvidenceItemResponse]
+    extracted_invoice_references: List[str]
+    has_conflicting_identifiers: bool
+
+
+class EvidenceCollectionRequest(BaseModel):
+    """Request payload for evidence collection evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class EvidenceCollectionResponse(BaseModel):
+    """Presentation DTO for complete Phase 14.9 Evidence Collection evaluation outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    payment_evidence: PaymentEvidenceContextResponse
+    candidate_bundles: List[CandidateEvidenceBundleResponse]
+    total_evidence_items: int
+    total_direct_items: int
+    total_supporting_items: int
+    total_missing_items: int
+    total_conflicting_items: int
+    is_deterministic: bool
+    collected_at: str
+
+
+

@@ -58,8 +58,12 @@ from app.modules.reconciliation.domain.combination_matching import (
     CombinationMatchRuleEngine,
     CombinationMatchStatus,
 )
+from app.modules.reconciliation.domain.evidence_collection import (
+    EvidenceCollectionEngine,
+    EvidenceCollectionResult,
+)
 from app.modules.reconciliation.domain.rules import PayerIdentificationRuleEngine
-from app.shared.exceptions import NotFoundError, ValidationError
+from app.shared.exceptions import ForbiddenError, NotFoundError, ValidationError
 
 
 class IdentifyPaymentCustomerUseCase:
@@ -1174,5 +1178,169 @@ class BatchCombinationMatchUseCase:
                 results.append(res)
 
         return results
+
+
+# ==============================================================================
+# Phase 14.9 Evidence Collection Use Cases
+# ==============================================================================
+
+
+class EvidenceCollectionUseCase:
+    """Execute Phase 14.9 Evidence Collection for a payment against candidate invoices.
+
+    Guarantees:
+    - Pure read-only fact evaluation: Zero financial accounting mutation (Rule 4).
+    - Fail-closed tenant isolation: Scoped strictly to authenticated company_id.
+    - Zero scoring / weighting: Exposes structured DIRECT / SUPPORTING / MISSING / CONFLICTING facts.
+    """
+
+    def __init__(
+        self,
+        payment_lookup_port: PaymentLookupPort,
+        customer_lookup_port: CustomerLookupPort,
+        invoice_lookup_port: InvoiceLookupPort,
+        filter_candidates_use_case: Optional[FilterCandidateInvoicesUseCase] = None,
+        evidence_collection_engine: Optional[EvidenceCollectionEngine] = None,
+    ) -> None:
+        self.payment_lookup_port = payment_lookup_port
+        self.customer_lookup_port = customer_lookup_port
+        self.invoice_lookup_port = invoice_lookup_port
+        self.filter_candidates_use_case = (
+            filter_candidates_use_case
+            or FilterCandidateInvoicesUseCase(
+                payment_lookup_port=payment_lookup_port,
+                customer_lookup_port=customer_lookup_port,
+                invoice_lookup_port=invoice_lookup_port,
+            )
+        )
+        self.evidence_collection_engine = (
+            evidence_collection_engine or EvidenceCollectionEngine()
+        )
+
+    def execute(
+        self,
+        payment_id: UUID,
+        company_id: UUID,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+        override_customer_id: Optional[UUID] = None,
+        filtered_universe: Optional[FilteredCandidateUniverse] = None,
+    ) -> EvidenceCollectionResult:
+        """Fetch payment, candidate universe, and customer context to collect structured evidence."""
+        # 1. Fetch payment intake context (Fail-closed 404 IDOR protection)
+        payment_context = self.payment_lookup_port.get_payment_intake_context(
+            payment_id=payment_id,
+            company_id=company_id,
+        )
+        if not payment_context:
+            raise NotFoundError(entity_name="Payment", entity_id=payment_id)
+
+        # 2. If pre-computed filtered universe is not provided, evaluate it via Phase 14.4
+        if filtered_universe is None:
+            filtered_universe = self.filter_candidates_use_case.execute(
+                payment_id=payment_id,
+                company_id=company_id,
+                criteria=filter_criteria,
+                override_customer_id=override_customer_id,
+            )
+
+        # 3. Retrieve customer context and all tenant customer contexts for cross-customer conflict evaluation
+        customer_context: Optional[CustomerLookupContext] = None
+        target_customer_id = override_customer_id or filtered_universe.customer_id
+        if target_customer_id:
+            customer_context = self.customer_lookup_port.get_customer_by_id(
+                customer_id=target_customer_id,
+                company_id=company_id,
+            )
+            if override_customer_id and not customer_context:
+                raise NotFoundError(entity_name="Customer", entity_id=override_customer_id)
+
+        all_customers = self.customer_lookup_port.get_active_customer_contexts(
+            company_id=company_id
+        )
+
+        # 4. Enforce tenant boundary validation on candidate invoices before evaluation
+        for cand in filtered_universe.retained_candidates:
+            cand_company_id = getattr(cand, "company_id", None)
+            if cand_company_id is not None and cand_company_id != company_id:
+                raise ForbiddenError(
+                    f"Candidate invoice {cand.invoice_number} belongs to company {cand_company_id}, "
+                    f"not authenticated company {company_id}."
+                )
+
+        # 5. Execute pure domain evidence collection
+        return self.evidence_collection_engine.evaluate(
+            payment=payment_context,
+            candidates=filtered_universe.retained_candidates,
+            customer=customer_context,
+            all_customers=all_customers,
+        )
+
+
+class BatchEvidenceCollectionUseCase:
+    """Batch evaluate evidence collection across multiple unreconciled payments.
+
+    Guarantees:
+    - Bounded to MAX_BATCH_SIZE = 100 payments.
+    - Zero financial accounting state mutation across all evaluated payments.
+    - Strict tenant isolation: all evaluated payments belong to authenticated company_id.
+    """
+
+    MAX_BATCH_SIZE = 100
+
+    def __init__(
+        self,
+        payment_lookup_port: PaymentLookupPort,
+        evidence_collection_use_case: EvidenceCollectionUseCase,
+    ) -> None:
+        self.payment_lookup_port = payment_lookup_port
+        self.evidence_collection_use_case = evidence_collection_use_case
+
+    def execute(
+        self,
+        company_id: UUID,
+        payment_ids: Optional[List[UUID]] = None,
+        limit: int = 50,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+    ) -> List[EvidenceCollectionResult]:
+        """Execute evidence collection evaluation across payments within tenant boundary."""
+        if limit < 1 or limit > self.MAX_BATCH_SIZE:
+            raise ValidationError(
+                f"Batch limit must be between 1 and {self.MAX_BATCH_SIZE}."
+            )
+
+        results: List[EvidenceCollectionResult] = []
+
+        if payment_ids:
+            if len(payment_ids) > self.MAX_BATCH_SIZE:
+                raise ValidationError(
+                    f"Requested {len(payment_ids)} payments exceeds maximum batch limit of {self.MAX_BATCH_SIZE}."
+                )
+            for p_id in payment_ids:
+                payment_context = self.payment_lookup_port.get_payment_intake_context(
+                    payment_id=p_id,
+                    company_id=company_id,
+                )
+                if payment_context:
+                    res = self.evidence_collection_use_case.execute(
+                        payment_id=p_id,
+                        company_id=company_id,
+                        filter_criteria=filter_criteria,
+                    )
+                    results.append(res)
+        else:
+            payment_contexts = self.payment_lookup_port.list_unreconciled_payment_contexts(
+                company_id=company_id,
+                limit=limit,
+            )
+            for payment_context in payment_contexts:
+                res = self.evidence_collection_use_case.execute(
+                    payment_id=payment_context.payment_id,
+                    company_id=company_id,
+                    filter_criteria=filter_criteria,
+                )
+                results.append(res)
+
+        return results
+
 
 
