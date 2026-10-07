@@ -65,6 +65,16 @@ from app.modules.reconciliation.domain.multi_invoice_matching import (
     MultiInvoiceMatchRuleEngine,
     MultiInvoiceMatchStatus,
 )
+from app.modules.reconciliation.domain.combination_matching import (
+    CombinationHypothesis,
+    CombinationMatchCriteria,
+    CombinationMatchEvidenceSignal,
+    CombinationMatchEvidenceType,
+    CombinationMatchReasonCode,
+    CombinationMatchResult,
+    CombinationMatchRuleEngine,
+    CombinationMatchStatus,
+)
 
 __all__ = [
     "IdentificationStatus",
@@ -114,5 +124,13 @@ __all__ = [
     "MultiInvoiceMatchHypothesis",
     "MultiInvoiceMatchResult",
     "MultiInvoiceMatchRuleEngine",
+    "CombinationMatchStatus",
+    "CombinationMatchReasonCode",
+    "CombinationMatchEvidenceType",
+    "CombinationMatchEvidenceSignal",
+    "CombinationMatchCriteria",
+    "CombinationHypothesis",
+    "CombinationMatchResult",
+    "CombinationMatchRuleEngine",
 ]
 

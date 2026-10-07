@@ -518,3 +518,106 @@ class BatchMultiInvoiceMatchResponse(BaseModel):
     no_matches_found: int
 
 
+# ==============================================================================
+# Phase 14.8 Combination Matching Presentation Schemas
+# ==============================================================================
+
+
+class CombinationMatchCriteriaRequest(BaseModel):
+    """Optional configuration for combination match evaluation."""
+
+    max_combination_size: int = Field(default=4, ge=2, le=4)
+    amount_tolerance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0.00"))
+    require_exact_currency: bool = True
+    date_proximity_days: int = Field(default=30, ge=0)
+    enable_fifo_aging: bool = True
+
+
+class CombinationMatchRequest(BaseModel):
+    """Request payload for combination match evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    criteria: Optional[CombinationMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class CombinationMatchEvidenceSignalResponse(BaseModel):
+    """Presentation DTO for an evidence signal supporting a combination match."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    evidence_type: str
+    signal_strength: str
+    description: str
+    matched_value: str
+    source_field: str
+    weight: float
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CombinationHypothesisResponse(BaseModel):
+    """Presentation DTO for a combination matching hypothesis."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_ids: List[UUID]
+    invoice_numbers: List[str]
+    matched_amount: str
+    invoices_outstanding_before: List[str]
+    invoices_outstanding_after: List[str]
+    payment_unallocated_before: str
+    payment_unallocated_after: str
+    currency: str
+    combination_size: int
+    oldest_due_date: str
+    newest_due_date: str
+    average_days_to_due: float
+    has_reference_match: bool
+    matched_reference_count: int
+    max_date_difference_days: int
+    is_fifo_prioritized: bool
+    evidence_signals: List[CombinationMatchEvidenceSignalResponse] = Field(default_factory=list)
+
+
+class CombinationMatchResponse(BaseModel):
+    """Presentation DTO for combination matching evaluation outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    customer_id: Optional[UUID] = None
+    status: str
+    prioritized_combination: Optional[CombinationHypothesisResponse] = None
+    competing_combinations: List[CombinationHypothesisResponse] = Field(default_factory=list)
+    total_combinations_found: int
+    applied_heuristic: Optional[str] = None
+    requires_review: bool
+    reason_code: str
+    reason_description: str
+    is_universe_truncated: bool
+    candidate_count_evaluated: int
+    is_deterministic: bool
+    evaluated_at: str
+
+
+class BatchCombinationMatchRequest(BaseModel):
+    """Request payload for batch combination matching evaluation."""
+
+    payment_ids: Optional[List[UUID]] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    criteria: Optional[CombinationMatchCriteriaRequest] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class BatchCombinationMatchResponse(BaseModel):
+    """Presentation response for batch combination matching evaluation."""
+
+    results: List[CombinationMatchResponse]
+    total_evaluated: int
+    unique_matches_found: int
+    prioritized_matches_found: int
+    ambiguous_matches_found: int
+    no_matches_found: int
+
+
