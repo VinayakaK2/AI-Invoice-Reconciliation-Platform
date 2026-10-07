@@ -348,3 +348,110 @@ def test_adversarial_schema_hard_bounding_k_exceeding_4_rejected(
         json={"criteria": {"max_combination_size": 1}},
     )
     assert resp_1.status_code == 422
+
+
+def test_adversarial_schema_hard_bounding_tolerance_exceeding_zero_rejected(
+    client: TestClient, registered_owner: dict
+) -> None:
+    """Case 6: Presentation schema and domain invariants hard-reject tolerance > 0.00.
+
+    Attempting amount_tolerance=0.01 must fail fast with HTTP 422.
+    """
+    headers = registered_owner["headers"]
+    random_id = uuid.uuid4()
+
+    resp = client.post(
+        f"/api/v1/reconciliation/combination-match/{random_id}",
+        headers=headers,
+        json={"criteria": {"amount_tolerance": "0.01"}},
+    )
+    assert resp.status_code == 422
+
+
+def test_adversarial_n30_k4_benchmark_performance_under_1_second() -> None:
+    """Case 7: Pure combinatorial stress benchmark for n=30 candidates with k in [2, 4].
+
+    Total combinations evaluated = C(30,2) + C(30,3) + C(30,4) = 435 + 4060 + 27405 = 31,900.
+    Must complete strictly under 1.0s (expected < 150ms in pure Python).
+    """
+    from app.modules.reconciliation.domain.combination_matching import (
+        CombinationMatchCriteria,
+        CombinationMatchRuleEngine,
+    )
+    from app.modules.reconciliation.domain.candidate_invoices import CandidateInvoice
+    from app.modules.reconciliation.domain.candidate_filters import (
+        CandidateFilterCriteria,
+        FilteredCandidateUniverse,
+    )
+    from app.modules.reconciliation.domain.rules import PaymentIntakeContext
+    from datetime import date, timedelta
+    from decimal import Decimal
+    import time
+    import uuid
+
+    engine = CombinationMatchRuleEngine()
+    pay_id = uuid.uuid4()
+    company_id = uuid.uuid4()
+    cust_id = uuid.uuid4()
+
+    payment = PaymentIntakeContext(
+        payment_id=pay_id,
+        company_id=company_id,
+        amount=Decimal("150000.00"),
+        currency="INR",
+        payment_date=date(2026, 8, 15),
+        narration="N30 K4 BENCHMARK PAYMENT",
+        payment_reference="BENCHMARK-30",
+        bank_account_number="123456789012",
+        allocated_amount=Decimal("0.00"),
+        unallocated_amount=Decimal("150000.00"),
+    )
+
+    candidates = []
+    base_date = date(2026, 8, 1)
+    for i in range(1, 31):
+        amt = Decimal(f"{i * 5000}.00")
+        candidates.append(
+            CandidateInvoice(
+                invoice_id=uuid.uuid4(),
+                invoice_number=f"INV-BENCH-{i:02d}",
+                total_amount=amt,
+                paid_amount=Decimal("0.00"),
+                outstanding_amount=amt,
+                currency="INR",
+                issue_date=base_date,
+                due_date=base_date + timedelta(days=i),
+                status="PENDING",
+                retrieval_priority=50.0,
+                evidence_signals=[],
+                is_exact_amount_match=False,
+                is_partial_amount_match=False,
+                is_reference_match=False,
+                rank=i,
+            )
+        )
+
+    universe = FilteredCandidateUniverse(
+        payment_id=pay_id,
+        company_id=company_id,
+        customer_id=cust_id,
+        retained_candidates=candidates,
+        excluded_candidates=[],
+        filter_criteria=CandidateFilterCriteria(),
+        total_evaluated=30,
+        total_retained=30,
+        total_excluded=0,
+        currency_mismatches_detected=0,
+        exclusion_breakdown={},
+        status_code="SUCCESS",
+    )
+
+    criteria = CombinationMatchCriteria(max_combination_size=4)
+
+    start = time.perf_counter()
+    result = engine.evaluate(payment=payment, universe=universe, criteria=criteria)
+    elapsed = time.perf_counter() - start
+
+    assert result is not None
+    assert result.candidate_count_evaluated == 30
+    assert elapsed < 1.0, f"n=30, k=4 benchmark exceeded SLA: {elapsed:.3f}s"

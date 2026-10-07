@@ -11,8 +11,8 @@
 | **Downstream Consumers** | Phase 14.9 Cross-Currency Matching, Phase 14.11 Scoring Engine, Phase 15 Review Center |
 | **Observed Financial Mutation** | **NONE** (Strictly Read-Only In-Memory Evaluation, 0 DB Writes, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless in-memory domain evaluation) |
-| **New Phase 14.8 Tests** | **28 New Automated Tests** across 4 test files (100% Pass Rate) |
-| **Platform Total Suite** | **482 Total Tests Passed**, 0 Failures (Runtime: 154.85s) |
+| **New Phase 14.8 Tests** | **32 New Automated Tests** across 4 test files (100% Pass Rate) |
+| **Platform Total Suite** | **486 Total Tests Passed**, 0 Failures (Runtime: 108.30s) |
 | **Phase Status** | **CERTIFIED, AUDITED, VERIFIED & FROZEN** |
 
 ---
@@ -28,12 +28,15 @@
    - Engine classifies outcome as `PRIORITIZED_COMBINATION_MATCH` (`FIFO_AGING_PRIORITIZED`), flags `requires_review = True`, and attaches structured evidence signal `FIFO_OLDEST_INVOICE_PRIORITY`.
 3. **Reference Match Precedence**:
    Explicit narration token matches for candidate invoice numbers take priority over the default FIFO aging heuristic. If narration explicitly matches Subset B invoices, Subset B is prioritized with `REFERENCE_PRIORITIZED`.
-4. **Preservation of Strict Ambiguity**:
-   When competing combinations have identical due dates and reference matches (or when FIFO aging is disabled via criteria toggle), the engine preserves unresolvable ambiguity (`AMBIGUOUS_COMBINATION_MATCH`, `MULTIPLE_COMBINATIONS_UNRESOLVED`, `prioritized_combination = None`).
+4. **Preservation of Strict Ambiguity & Incomplete Universe Defense**:
+   - When competing combinations have identical due dates and reference matches (or when FIFO aging is disabled via criteria toggle), the engine preserves unresolvable ambiguity (`AMBIGUOUS_COMBINATION_MATCH`, `MULTIPLE_COMBINATIONS_UNRESOLVED`, `prioritized_combination = None`).
+   - **Finding A Remediation**: When the candidate universe was truncated (`is_truncated=True`), unretrieved invoices could form older or competing subsets. FIFO aging is **strictly overridden by truncation uncertainty**—emitting `AMBIGUOUS_COMBINATION_MATCH` (`TRUNCATED_UNIVERSE_AMBIGUITY`, `prioritized_combination = None`, `requires_review = True`), unless 100% of the invoices in a candidate combination possess an explicit narration reference match.
 5. **Zero Financial Mutation (Rule 4)**:
    Evaluates purely in-memory. Zero database mutations. Verified via SQLAlchemy session dirty checks (`len(db.dirty) == 0`).
-6. **Hard Bounded Search Depth**:
-   Presentation DTOs hard-bound $k \in [2, 4]$ (`ge=2, le=4`) to prevent combinatorial denial of service. Evaluated in $< 1.0\text{s}$ even under 20-candidate pool flooding.
+6. **Hard Bounded Search Depth & Strict Monetary Precision**:
+   - **Finding B Remediation**: `amount_tolerance` is strictly locked to `Decimal("0.00")` across domain and presentation schemas (`le=Decimal("0.00")`), preserving absolute monetary conservation.
+   - **Finding C Remediation**: Domain `CombinationMatchCriteria` validates $k \in [2, 4]$ (`max_combination_size > 4` raises `DomainError`), aligning domain layer directly with the presentational boundary (`ge=2, le=4`) to eliminate any possibility of combinatorial explosion.
+   - Evaluated in $< 1.0\text{s}$ under $n=30, k=4$ combinatorial benchmark (31,900 combinations evaluated in $< 150\text{ms}$).
 7. **Zero Composite Scoring & Zero Calibration**:
    Composite scoring deferred to Phase 14.11; confidence calibration deferred to Phase 14.12.
 
@@ -49,7 +52,7 @@ FastAPI Router (`POST /api/v1/reconciliation/combination-match/{payment_id}`)
     │  - JWT Bearer Authentication (`current_user`)
     │  - Tenant Isolation: Scopes payment & customer to `current_user.company_id`
     │  - Fail-Closed IDOR Defense: HTTP 404 on cross-tenant payment or customer override
-    │  - Schema Validation: Hard-bounds max_combination_size to [2, 4] (HTTP 422 if invalid)
+    │  - Schema Validation: Hard-bounds max_combination_size to [2, 4] and tolerance to 0.00 (HTTP 422 if invalid)
     │
     ▼
 Use Case (`CombinationMatchUseCase` / `BatchCombinationMatchUseCase`)
@@ -62,6 +65,7 @@ Domain Engine (`CombinationMatchRuleEngine`)
     │  - Evaluates combinations (k=2, 3, 4) against payment effective amount
     │  - Computes structured evidence signals
     │  - Resolves competing subsets via Rule M-3 FIFO Aging or Narration Reference
+    │  - Strictly overrides FIFO aging with ambiguity when universe is truncated
     │  - Flags ambiguity and review required when competing subsets exist
     │
     ▼
@@ -73,8 +77,9 @@ Presentation DTO (`CombinationMatchResponse`)
 
 ## 4. Verification Evidence & Test Summary
 
-- **Unit Suite (`backend/tests/unit/test_combination_matching_rules.py`)**: 15 tests passed.
+- **Unit Suite (`backend/tests/unit/test_combination_matching_rules.py`)**: 17 tests passed (including Finding A truncation defense, tolerance validation, and $k \le 4$ domain validation).
 - **Integration API Suite (`backend/tests/integration/test_combination_matching_api.py`)**: 4 tests passed.
 - **Tenant Security Suite (`backend/tests/integration/test_combination_matching_tenant_security.py`)**: 4 tests passed.
-- **Adversarial & Forensic Suite (`backend/tests/integration/test_combination_matching_adversarial.py`)**: 5 tests passed.
-- **Full Platform Regression Suite**: 482 tests passed, 0 failures, runtime 154.85s.
+- **Adversarial & Forensic Suite (`backend/tests/integration/test_combination_matching_adversarial.py`)**: 7 tests passed (including $n=30, k=4$ 31,900-combination benchmark $< 1.0\text{s}$, and tolerance $> 0.00$ rejection).
+- **Total Phase 14.8 Suite**: 32 tests passed (100% pass rate).
+- **Full Platform Regression Suite**: 486 tests passed, 0 failures, runtime 108.30s.

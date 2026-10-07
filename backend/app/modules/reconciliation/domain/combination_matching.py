@@ -118,13 +118,13 @@ class CombinationMatchCriteria:
             raise DomainError(
                 f"max_combination_size must be at least 2. Got: {self.max_combination_size}"
             )
-        if self.max_combination_size > 10:
+        if self.max_combination_size > 4:
             raise DomainError(
-                f"max_combination_size cannot exceed 10 for combinatorial safety. Got: {self.max_combination_size}"
+                f"max_combination_size cannot exceed 4 for combinatorial safety. Got: {self.max_combination_size}"
             )
-        if self.amount_tolerance < Decimal("0.00"):
+        if self.amount_tolerance != Decimal("0.00"):
             raise DomainError(
-                f"amount_tolerance must be non-negative. Got: {self.amount_tolerance}"
+                f"amount_tolerance must be Decimal('0.00') in accordance with exact monetary conservation rules. Got: {self.amount_tolerance}"
             )
         if self.date_proximity_days < 0:
             raise DomainError(
@@ -576,6 +576,28 @@ class CombinationMatchRuleEngine:
 
         if max_refs > 0 and len(top_ref_combos) == 1:
             prioritized = top_ref_combos[0]
+            # If universe was truncated, reference priority holds ONLY IF all invoices in combination are explicitly matched
+            if is_truncated and prioritized.matched_reference_count < prioritized.combination_size:
+                deterministic_order = self._sort_hypotheses_deterministically(hypotheses)
+                return CombinationMatchResult(
+                    payment_id=payment.payment_id,
+                    company_id=payment.company_id,
+                    customer_id=universe.customer_id,
+                    status=CombinationMatchStatus.AMBIGUOUS_COMBINATION_MATCH,
+                    prioritized_combination=None,
+                    competing_combinations=deterministic_order,
+                    total_combinations_found=len(hypotheses),
+                    applied_heuristic=None,
+                    requires_review=True,
+                    reason_code=CombinationMatchReasonCode.TRUNCATED_UNIVERSE_AMBIGUITY,
+                    reason_description=(
+                        f"Found {len(hypotheses)} competing combinations and narration partially references {prioritized.matched_reference_count} "
+                        f"invoices, but candidate universe was truncated to enforce bounding limit. Flagged for review due to incomplete universe."
+                    ),
+                    is_universe_truncated=True,
+                    candidate_count_evaluated=len(universe.retained_candidates),
+                )
+
             # Order remaining combinations deterministically
             remaining = [h for h in hypotheses if h != prioritized]
             remaining_sorted = self._sort_hypotheses_deterministically(remaining)
@@ -598,6 +620,32 @@ class CombinationMatchRuleEngine:
                     f"Flagged for human review due to {len(hypotheses) - 1} competing mathematical combinations."
                 ),
                 is_universe_truncated=is_truncated,
+                candidate_count_evaluated=len(universe.retained_candidates),
+            )
+
+        # Truncated universe defense:
+        # If candidate universe was truncated and no single combination has 100% explicit reference proof,
+        # FIFO aging heuristic CANNOT safely prioritize a combination because unretrieved invoices might form older or better subsets.
+        # Strict ambiguity must be preserved!
+        if is_truncated:
+            deterministic_order = self._sort_hypotheses_deterministically(hypotheses)
+            return CombinationMatchResult(
+                payment_id=payment.payment_id,
+                company_id=payment.company_id,
+                customer_id=universe.customer_id,
+                status=CombinationMatchStatus.AMBIGUOUS_COMBINATION_MATCH,
+                prioritized_combination=None,
+                competing_combinations=deterministic_order,
+                total_combinations_found=len(hypotheses),
+                applied_heuristic=None,
+                requires_review=True,
+                reason_code=CombinationMatchReasonCode.TRUNCATED_UNIVERSE_AMBIGUITY,
+                reason_description=(
+                    f"Found {len(hypotheses)} competing combinations with no full explicit reference, "
+                    f"and candidate universe was truncated to enforce bounding limit. FIFO aging heuristic "
+                    f"overridden by truncated universe ambiguity. Flagged for review."
+                ),
+                is_universe_truncated=True,
                 candidate_count_evaluated=len(universe.retained_candidates),
             )
 

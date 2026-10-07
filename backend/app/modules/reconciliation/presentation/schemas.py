@@ -527,7 +527,7 @@ class CombinationMatchCriteriaRequest(BaseModel):
     """Optional configuration for combination match evaluation."""
 
     max_combination_size: int = Field(default=4, ge=2, le=4)
-    amount_tolerance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0.00"))
+    amount_tolerance: Decimal = Field(default=Decimal("0.00"), ge=Decimal("0.00"), le=Decimal("0.00"))
     require_exact_currency: bool = True
     date_proximity_days: int = Field(default=30, ge=0)
     enable_fifo_aging: bool = True

@@ -144,13 +144,16 @@ def test_criteria_validation_invariants() -> None:
     with pytest.raises(DomainError, match="max_combination_size must be at least 2"):
         CombinationMatchCriteria(max_combination_size=1)
 
-    # max_combination_size > 10 raises DomainError
-    with pytest.raises(DomainError, match="max_combination_size cannot exceed 10"):
-        CombinationMatchCriteria(max_combination_size=11)
+    # max_combination_size > 4 raises DomainError (production combinatorial safety boundary)
+    with pytest.raises(DomainError, match="max_combination_size cannot exceed 4"):
+        CombinationMatchCriteria(max_combination_size=5)
 
-    # amount_tolerance < 0 raises DomainError
-    with pytest.raises(DomainError, match="amount_tolerance must be non-negative"):
+    # amount_tolerance != 0 raises DomainError (strict monetary conservation)
+    with pytest.raises(DomainError, match="amount_tolerance must be Decimal\\('0.00'\\)"):
         CombinationMatchCriteria(amount_tolerance=Decimal("-0.01"))
+
+    with pytest.raises(DomainError, match="amount_tolerance must be Decimal\\('0.00'\\)"):
+        CombinationMatchCriteria(amount_tolerance=Decimal("0.01"))
 
     # date_proximity_days < 0 raises DomainError
     with pytest.raises(DomainError, match="date_proximity_days must be non-negative"):
@@ -427,6 +430,69 @@ def test_truncated_universe_ambiguity() -> None:
     assert result.reason_code == CombinationMatchReasonCode.TRUNCATED_UNIVERSE_AMBIGUITY
     assert result.is_universe_truncated is True
     assert result.requires_review is True
+
+
+def test_truncated_universe_with_competing_combinations_fifo_overridden_by_ambiguity() -> None:
+    """Finding A defense: Truncated universe with competing combinations and FIFO enabled MUST NOT
+
+    autonomously prioritize Subset A via FIFO aging. Incomplete universe means unretrieved debt
+    could be older or alter subset feasibility. Engine must force AMBIGUOUS_COMBINATION_MATCH.
+    """
+    engine = CombinationMatchRuleEngine()
+    pay = _make_payment("35000.00")
+
+    # Subset A (settles oldest debt, May 2026): 10k + 25k = 35k
+    inv1 = _make_candidate("INV-10K", "10000.00", date(2026, 5, 1))
+    inv2 = _make_candidate("INV-25K", "25000.00", date(2026, 5, 15))
+
+    # Subset B (June 2026): 15k + 8k + 12k = 35k
+    inv3 = _make_candidate("INV-15K", "15000.00", date(2026, 6, 1))
+    inv4 = _make_candidate("INV-8K", "8000.00", date(2026, 6, 10))
+    inv5 = _make_candidate("INV-12K", "12000.00", date(2026, 6, 20))
+
+    # Candidate universe truncated, no references, FIFO aging enabled
+    universe = _make_universe([inv1, inv2, inv3, inv4, inv5], payment=pay, status_code="TRUNCATED")
+    crit = CombinationMatchCriteria(enable_fifo_aging=True)
+    result = engine.evaluate(payment=pay, universe=universe, criteria=crit)
+
+    assert result.status == CombinationMatchStatus.AMBIGUOUS_COMBINATION_MATCH
+    assert result.prioritized_combination is None
+    assert result.applied_heuristic is None
+    assert result.requires_review is True
+    assert result.reason_code == CombinationMatchReasonCode.TRUNCATED_UNIVERSE_AMBIGUITY
+    assert result.is_universe_truncated is True
+    assert result.total_combinations_found == 2
+    assert len(result.competing_combinations) == 2
+
+
+def test_truncated_universe_competing_combinations_fully_referenced_prioritized() -> None:
+    """If universe was truncated but a competing combination has 100% explicit reference proof
+
+    (matched_reference_count == combination_size), reference certainty overrides truncation uncertainty.
+    """
+    engine = CombinationMatchRuleEngine()
+    pay = _make_payment("35000.00", narration="SETTLEMENT FOR INV-10K AND INV-25K")
+
+    # Subset A: has 100% reference match (2 out of 2 invoices explicitly mentioned)
+    inv1 = _make_candidate("INV-10K", "10000.00", date(2026, 5, 1), is_ref_match=True)
+    inv2 = _make_candidate("INV-25K", "25000.00", date(2026, 5, 15), is_ref_match=True)
+
+    # Subset B: 0 reference matches
+    inv3 = _make_candidate("INV-15K", "15000.00", date(2026, 6, 1))
+    inv4 = _make_candidate("INV-8K", "8000.00", date(2026, 6, 10))
+    inv5 = _make_candidate("INV-12K", "12000.00", date(2026, 6, 20))
+
+    universe = _make_universe([inv1, inv2, inv3, inv4, inv5], payment=pay, status_code="TRUNCATED")
+    result = engine.evaluate(payment=pay, universe=universe)
+
+    assert result.status == CombinationMatchStatus.PRIORITIZED_COMBINATION_MATCH
+    assert result.applied_heuristic == "REFERENCE_MATCH_PRIORITY"
+    assert result.reason_code == CombinationMatchReasonCode.REFERENCE_PRIORITIZED
+    assert result.requires_review is True
+    assert result.prioritized_combination is not None
+    assert set(result.prioritized_combination.invoice_numbers) == {"INV-10K", "INV-25K"}
+    assert result.prioritized_combination.matched_reference_count == 2
+    assert result.is_universe_truncated is True
 
 
 def test_underpayment_diagnosed_when_all_eligible_sum_too_small() -> None:
