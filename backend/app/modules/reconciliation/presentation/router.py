@@ -23,6 +23,8 @@ from app.modules.reconciliation.application.use_cases import (
     IntakePaymentUseCase,
     MultiInvoiceMatchUseCase,
     PartialMatchUseCase,
+    EvidenceCollectionUseCase,
+    BatchEvidenceCollectionUseCase,
 )
 from app.modules.reconciliation.domain.candidate_filters import (
     CandidateFilterCriteria,
@@ -113,6 +115,11 @@ from app.modules.reconciliation.presentation.schemas import (
     PartialMatchRequest,
     PartialMatchResponse,
     PaymentIntakeResponse,
+    StructuredEvidenceItemResponse,
+    CandidateEvidenceBundleResponse,
+    PaymentEvidenceContextResponse,
+    EvidenceCollectionRequest,
+    EvidenceCollectionResponse,
     mask_bank_account,
     mask_evidence_matched_value,
 )
@@ -1454,6 +1461,135 @@ def batch_evaluate_combination_matches(
             no_matches_found=no_match_count,
         ),
     }
+
+
+# ==============================================================================
+# Phase 14.9 Evidence Collection Router Endpoints
+# ==============================================================================
+
+
+def _map_evidence_item_to_response(item: Any) -> StructuredEvidenceItemResponse:
+    """Map StructuredEvidenceItem domain value object to presentation schema."""
+    return StructuredEvidenceItemResponse(
+        evidence_type=item.evidence_type.value,
+        classification=item.classification.value,
+        source_field=item.source_field,
+        observed_result=item.observed_result,
+        description=item.description,
+        target_entity=item.target_entity,
+        matched_value=mask_evidence_matched_value(item.evidence_type.value, item.matched_value)
+        if item.matched_value
+        else None,
+        expected_value=item.expected_value,
+        metadata=item.metadata,
+    )
+
+
+def _map_evidence_collection_result_to_response(
+    result: Any,
+) -> EvidenceCollectionResponse:
+    """Map EvidenceCollectionResult domain aggregate to presentation schema."""
+    payment_evidence_dto = PaymentEvidenceContextResponse(
+        payment_id=result.payment_evidence.payment_id,
+        company_id=result.payment_evidence.company_id,
+        items=[_map_evidence_item_to_response(i) for i in result.payment_evidence.items],
+        extracted_invoice_references=result.payment_evidence.extracted_invoice_references,
+        has_conflicting_identifiers=result.payment_evidence.has_conflicting_identifiers,
+    )
+
+    bundle_dtos = [
+        CandidateEvidenceBundleResponse(
+            invoice_id=b.invoice_id,
+            invoice_number=b.invoice_number,
+            items=[_map_evidence_item_to_response(i) for i in b.items],
+            has_conflicting_evidence=b.has_conflicting_evidence,
+            direct_evidence_count=b.direct_evidence_count,
+            supporting_evidence_count=b.supporting_evidence_count,
+            missing_evidence_count=b.missing_evidence_count,
+            conflicting_evidence_count=b.conflicting_evidence_count,
+        )
+        for b in result.candidate_bundles
+    ]
+
+    return EvidenceCollectionResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        payment_evidence=payment_evidence_dto,
+        candidate_bundles=bundle_dtos,
+        total_evidence_items=result.total_evidence_items,
+        total_direct_items=result.total_direct_items,
+        total_supporting_items=result.total_supporting_items,
+        total_missing_items=result.total_missing_items,
+        total_conflicting_items=result.total_conflicting_items,
+        is_deterministic=result.is_deterministic,
+        collected_at=result.collected_at.isoformat(),
+    )
+
+
+@router.post(
+    "/evidence-collection/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def collect_evidence_for_payment(
+    payment_id: UUID,
+    payload: Optional[EvidenceCollectionRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Collect and classify structured evidence (DIRECT, SUPPORTING, MISSING, CONFLICTING) for a payment.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Rule 4).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Zero scoring / weighting: Exposes structured factual signals without deciding or approving.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    use_case = EvidenceCollectionUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_evidence_collection_result_to_response(result),
+    }
+
 
 
 
