@@ -9,11 +9,13 @@ from app.core.database import get_db
 from app.modules.auth.domain.entities import User
 from app.modules.auth.presentation.dependencies import get_current_user
 from app.modules.reconciliation.application.use_cases import (
+    BatchCombinationMatchUseCase,
     BatchExactMatchUseCase,
     BatchIdentifyPaymentCustomersUseCase,
     BatchIntakePaymentUseCase,
     BatchMultiInvoiceMatchUseCase,
     BatchPartialMatchUseCase,
+    CombinationMatchUseCase,
     ExactMatchUseCase,
     FilterCandidateInvoicesUseCase,
     GenerateCandidateInvoicesUseCase,
@@ -54,6 +56,12 @@ from app.modules.reconciliation.domain.multi_invoice_matching import (
     MultiInvoiceMatchResult,
     MultiInvoiceMatchStatus,
 )
+from app.modules.reconciliation.domain.combination_matching import (
+    CombinationHypothesis,
+    CombinationMatchCriteria,
+    CombinationMatchResult,
+    CombinationMatchStatus,
+)
 from app.modules.reconciliation.domain.invoice_rules import CandidateInvoiceRuleEngine
 from app.modules.reconciliation.domain.payment_intake import PaymentIntakeResult
 from app.modules.reconciliation.infrastructure.adapters import (
@@ -62,6 +70,8 @@ from app.modules.reconciliation.infrastructure.adapters import (
     SQLAlchemyPaymentLookupAdapter,
 )
 from app.modules.reconciliation.presentation.schemas import (
+    BatchCombinationMatchRequest,
+    BatchCombinationMatchResponse,
     BatchCustomerIdentificationRequest,
     BatchCustomerIdentificationResponse,
     BatchExactMatchRequest,
@@ -76,6 +86,11 @@ from app.modules.reconciliation.presentation.schemas import (
     CandidateInvoiceEvidenceResponse,
     CandidateInvoiceResponse,
     CandidateInvoiceUniverseResponse,
+    CombinationHypothesisResponse,
+    CombinationMatchCriteriaRequest,
+    CombinationMatchEvidenceSignalResponse,
+    CombinationMatchRequest,
+    CombinationMatchResponse,
     CustomerCandidateResponse,
     CustomerIdentificationResponse,
     EvidenceSignalResponse,
@@ -1199,5 +1214,246 @@ def batch_evaluate_multi_invoice_matches(
             no_matches_found=no_match_count,
         ),
     }
+
+
+# ==============================================================================
+# Phase 14.8 Combination Matching Presentation Endpoints & Mappers
+# ==============================================================================
+
+
+def _map_combination_hypothesis_to_response(
+    hypothesis: Optional[CombinationHypothesis],
+) -> Optional[CombinationHypothesisResponse]:
+    """Map domain CombinationHypothesis to presentation response DTO."""
+    if not hypothesis:
+        return None
+    return CombinationHypothesisResponse(
+        invoice_ids=hypothesis.invoice_ids,
+        invoice_numbers=hypothesis.invoice_numbers,
+        matched_amount=str(hypothesis.matched_amount),
+        invoices_outstanding_before=[str(amt) for amt in hypothesis.invoices_outstanding_before],
+        invoices_outstanding_after=[str(amt) for amt in hypothesis.invoices_outstanding_after],
+        payment_unallocated_before=str(hypothesis.payment_unallocated_before),
+        payment_unallocated_after=str(hypothesis.payment_unallocated_after),
+        currency=hypothesis.currency,
+        combination_size=hypothesis.combination_size,
+        oldest_due_date=hypothesis.oldest_due_date.isoformat(),
+        newest_due_date=hypothesis.newest_due_date.isoformat(),
+        average_days_to_due=hypothesis.average_days_to_due,
+        has_reference_match=hypothesis.has_reference_match,
+        matched_reference_count=hypothesis.matched_reference_count,
+        max_date_difference_days=hypothesis.max_date_difference_days,
+        is_fifo_prioritized=hypothesis.is_fifo_prioritized,
+        evidence_signals=[
+            CombinationMatchEvidenceSignalResponse(
+                evidence_type=sig.evidence_type.value,
+                signal_strength=sig.signal_strength.value,
+                description=sig.description,
+                matched_value=sig.matched_value,
+                source_field=sig.source_field,
+                weight=sig.weight,
+                metadata=sig.metadata,
+            )
+            for sig in hypothesis.evidence_signals
+        ],
+    )
+
+
+def _map_combination_match_result_to_response(
+    result: CombinationMatchResult,
+) -> CombinationMatchResponse:
+    """Map CombinationMatchResult domain aggregate to presentation response schema."""
+    prioritized_dto = (
+        _map_combination_hypothesis_to_response(result.prioritized_combination)
+        if result.prioritized_combination
+        else None
+    )
+    competing_dtos = [
+        _map_combination_hypothesis_to_response(c) for c in result.competing_combinations
+    ]
+
+    return CombinationMatchResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        customer_id=result.customer_id,
+        status=result.status.value,
+        prioritized_combination=prioritized_dto,
+        competing_combinations=[c for c in competing_dtos if c is not None],
+        total_combinations_found=result.total_combinations_found,
+        applied_heuristic=result.applied_heuristic,
+        requires_review=result.requires_review,
+        reason_code=result.reason_code.value,
+        reason_description=result.reason_description,
+        is_universe_truncated=result.is_universe_truncated,
+        candidate_count_evaluated=result.candidate_count_evaluated,
+        is_deterministic=result.is_deterministic,
+        evaluated_at=result.evaluated_at.isoformat(),
+    )
+
+
+@router.post(
+    "/combination-match/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def evaluate_combination_match(
+    payment_id: UUID,
+    payload: Optional[CombinationMatchRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Deterministically evaluate combination matching (1:N) for a single payment.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Rule 4).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Evaluates competing candidate combinations and applies Rule M-3 FIFO aging heuristics.
+    - Strictly flags REVIEW_REQUIRED whenever competing combinations are resolved via heuristics.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    use_case = CombinationMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+
+    criteria = None
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.criteria:
+            criteria = CombinationMatchCriteria(
+                max_combination_size=payload.criteria.max_combination_size,
+                amount_tolerance=payload.criteria.amount_tolerance,
+                require_exact_currency=payload.criteria.require_exact_currency,
+                date_proximity_days=payload.criteria.date_proximity_days,
+                enable_fifo_aging=payload.criteria.enable_fifo_aging,
+            )
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_combination_match_result_to_response(result),
+    }
+
+
+@router.post(
+    "/combination-match-batch",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def batch_evaluate_combination_matches(
+    payload: BatchCombinationMatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Batch evaluate combination matching (1:N) across unreconciled payments for tenant.
+
+    Bounded to max 100 payments per batch. Evaluates without mutating financial state.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    comb_use_case = CombinationMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    batch_use_case = BatchCombinationMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        combination_match_use_case=comb_use_case,
+    )
+
+    criteria = None
+    filter_criteria = None
+
+    if payload.criteria:
+        criteria = CombinationMatchCriteria(
+            max_combination_size=payload.criteria.max_combination_size,
+            amount_tolerance=payload.criteria.amount_tolerance,
+            require_exact_currency=payload.criteria.require_exact_currency,
+            date_proximity_days=payload.criteria.date_proximity_days,
+            enable_fifo_aging=payload.criteria.enable_fifo_aging,
+        )
+    if payload.filter_criteria:
+        fc = payload.filter_criteria
+        statuses = (
+            set(fc.allowed_statuses)
+            if fc.allowed_statuses is not None
+            else {"PENDING", "PARTIALLY_PAID"}
+        )
+        filter_criteria = CandidateFilterCriteria(
+            min_amount=fc.min_amount,
+            max_amount=fc.max_amount,
+            max_lookback_days=fc.max_lookback_days,
+            max_advance_days=fc.max_advance_days,
+            require_causality=fc.require_causality,
+            allowed_statuses=statuses,
+            require_reference_match=fc.require_reference_match,
+            disallow_overpayment=fc.disallow_overpayment,
+            max_candidates=fc.max_candidates,
+        )
+
+    results = batch_use_case.execute(
+        company_id=current_user.company_id,
+        payment_ids=payload.payment_ids,
+        limit=payload.limit,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+    )
+
+    dto_results = [_map_combination_match_result_to_response(r) for r in results]
+    unique_count = sum(1 for r in results if r.status == CombinationMatchStatus.UNIQUE_COMBINATION_MATCH)
+    prioritized_count = sum(
+        1 for r in results if r.status == CombinationMatchStatus.PRIORITIZED_COMBINATION_MATCH
+    )
+    ambiguous_count = sum(
+        1 for r in results if r.status == CombinationMatchStatus.AMBIGUOUS_COMBINATION_MATCH
+    )
+    no_match_count = sum(1 for r in results if r.status == CombinationMatchStatus.NO_COMBINATION_MATCH)
+
+    return {
+        "success": True,
+        "data": BatchCombinationMatchResponse(
+            results=dto_results,
+            total_evaluated=len(dto_results),
+            unique_matches_found=unique_count,
+            prioritized_matches_found=prioritized_count,
+            ambiguous_matches_found=ambiguous_count,
+            no_matches_found=no_match_count,
+        ),
+    }
+
 
 

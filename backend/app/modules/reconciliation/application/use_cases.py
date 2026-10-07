@@ -51,6 +51,13 @@ from app.modules.reconciliation.domain.multi_invoice_matching import (
     MultiInvoiceMatchRuleEngine,
     MultiInvoiceMatchStatus,
 )
+from app.modules.reconciliation.domain.combination_matching import (
+    CombinationMatchCriteria,
+    CombinationMatchReasonCode,
+    CombinationMatchResult,
+    CombinationMatchRuleEngine,
+    CombinationMatchStatus,
+)
 from app.modules.reconciliation.domain.rules import PayerIdentificationRuleEngine
 from app.shared.exceptions import NotFoundError, ValidationError
 
@@ -999,6 +1006,166 @@ class BatchMultiInvoiceMatchUseCase:
             )
             for payment_context in payment_contexts:
                 res = self.multi_invoice_match_use_case.execute(
+                    payment_id=payment_context.payment_id,
+                    company_id=company_id,
+                    criteria=criteria,
+                    filter_criteria=filter_criteria,
+                )
+                results.append(res)
+
+        return results
+
+
+class CombinationMatchUseCase:
+    """Execute Phase 14.8 Combination Matching for a payment against candidate invoices.
+
+    Guarantees:
+    - Pure in-memory fact generation; zero financial accounting state mutation.
+    - Strict fail-closed IDOR security (returns 404 for cross-tenant payment or customer access).
+    - Consumes bounded, 11-gate-filtered candidate universe from Phase 14.4.
+    - Evaluates competing candidate combinations, applying reference prioritization and Rule M-3
+      FIFO aging heuristics (prioritizing the oldest outstanding invoices by due_date).
+    - Strictly flags REVIEW_REQUIRED whenever competing combinations are resolved via heuristics.
+    - Preserves unresolvable ambiguity when combinations have identical aging and evidence.
+    """
+
+    def __init__(
+        self,
+        payment_lookup_port: PaymentLookupPort,
+        customer_lookup_port: CustomerLookupPort,
+        invoice_lookup_port: InvoiceLookupPort,
+        filter_candidates_use_case: Optional[FilterCandidateInvoicesUseCase] = None,
+        combination_match_rule_engine: Optional[CombinationMatchRuleEngine] = None,
+    ) -> None:
+        self.payment_lookup_port = payment_lookup_port
+        self.customer_lookup_port = customer_lookup_port
+        self.invoice_lookup_port = invoice_lookup_port
+        self.filter_candidates_use_case = (
+            filter_candidates_use_case
+            or FilterCandidateInvoicesUseCase(
+                payment_lookup_port=payment_lookup_port,
+                customer_lookup_port=customer_lookup_port,
+                invoice_lookup_port=invoice_lookup_port,
+            )
+        )
+        self.combination_match_rule_engine = (
+            combination_match_rule_engine or CombinationMatchRuleEngine()
+        )
+
+    def execute(
+        self,
+        payment_id: UUID,
+        company_id: UUID,
+        criteria: Optional[CombinationMatchCriteria] = None,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+        override_customer_id: Optional[UUID] = None,
+        filtered_universe: Optional[FilteredCandidateUniverse] = None,
+    ) -> CombinationMatchResult:
+        """Fetch payment, obtain filtered candidate universe, and evaluate combination match."""
+        # 1. Fetch payment intake context (Fail-closed 404 IDOR protection)
+        payment_context = self.payment_lookup_port.get_payment_intake_context(
+            payment_id=payment_id,
+            company_id=company_id,
+        )
+        if not payment_context:
+            raise NotFoundError(entity_name="Payment", entity_id=payment_id)
+
+        # 2. Check payment intake eligibility via Phase 14.1 Payment Intake Gateway
+        intake_result = PaymentIntakeRuleEngine.evaluate(payment_context)
+        if not intake_result.is_eligible:
+            return CombinationMatchResult(
+                payment_id=payment_id,
+                company_id=company_id,
+                customer_id=override_customer_id,
+                status=CombinationMatchStatus.NO_COMBINATION_MATCH,
+                prioritized_combination=None,
+                competing_combinations=[],
+                total_combinations_found=0,
+                applied_heuristic=None,
+                requires_review=False,
+                reason_code=CombinationMatchReasonCode.PAYMENT_INELIGIBLE,
+                reason_description=f"Payment is not eligible for reconciliation intake: {intake_result.reason_description}",
+                is_universe_truncated=False,
+                candidate_count_evaluated=0,
+            )
+
+        # 3. If pre-computed filtered universe is not provided, evaluate it via Phase 14.4
+        if filtered_universe is None:
+            filtered_universe = self.filter_candidates_use_case.execute(
+                payment_id=payment_id,
+                company_id=company_id,
+                criteria=filter_criteria,
+                override_customer_id=override_customer_id,
+            )
+
+        # 4. Evaluate combination matching fact via pure domain engine
+        return self.combination_match_rule_engine.evaluate(
+            payment=payment_context,
+            universe=filtered_universe,
+            criteria=criteria,
+        )
+
+
+class BatchCombinationMatchUseCase:
+    """Batch evaluate combination matching across multiple unreconciled payments.
+
+    Guarantees:
+    - Bounded to MAX_BATCH_SIZE = 100 payments.
+    - Zero financial accounting state mutation across all evaluated payments.
+    - Strict tenant isolation: all evaluated payments belong to authenticated company_id.
+    """
+
+    MAX_BATCH_SIZE = 100
+
+    def __init__(
+        self,
+        payment_lookup_port: PaymentLookupPort,
+        combination_match_use_case: CombinationMatchUseCase,
+    ) -> None:
+        self.payment_lookup_port = payment_lookup_port
+        self.combination_match_use_case = combination_match_use_case
+
+    def execute(
+        self,
+        company_id: UUID,
+        payment_ids: Optional[List[UUID]] = None,
+        limit: int = 50,
+        criteria: Optional[CombinationMatchCriteria] = None,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+    ) -> List[CombinationMatchResult]:
+        """Execute combination match evaluation across payments within tenant boundary."""
+        if limit < 1 or limit > self.MAX_BATCH_SIZE:
+            raise ValidationError(
+                f"Batch limit must be between 1 and {self.MAX_BATCH_SIZE}."
+            )
+
+        results: List[CombinationMatchResult] = []
+
+        if payment_ids:
+            if len(payment_ids) > self.MAX_BATCH_SIZE:
+                raise ValidationError(
+                    f"Requested {len(payment_ids)} payments exceeds maximum batch limit of {self.MAX_BATCH_SIZE}."
+                )
+            for p_id in payment_ids:
+                payment_context = self.payment_lookup_port.get_payment_intake_context(
+                    payment_id=p_id,
+                    company_id=company_id,
+                )
+                if payment_context:
+                    res = self.combination_match_use_case.execute(
+                        payment_id=p_id,
+                        company_id=company_id,
+                        criteria=criteria,
+                        filter_criteria=filter_criteria,
+                    )
+                    results.append(res)
+        else:
+            payment_contexts = self.payment_lookup_port.list_unreconciled_payment_contexts(
+                company_id=company_id,
+                limit=limit,
+            )
+            for payment_context in payment_contexts:
+                res = self.combination_match_use_case.execute(
                     payment_id=payment_context.payment_id,
                     company_id=company_id,
                     criteria=criteria,
