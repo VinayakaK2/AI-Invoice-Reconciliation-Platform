@@ -9,7 +9,7 @@
 | **Architecture Pattern** | Modular Monolith + Clean Architecture + DDD Lite |
 | **Upstream Contracts** | Phase 14.1 Payment Intake, Phase 14.2 Payer Identification, Phase 14.3 Candidate Invoice Generation (**ALL FROZEN**) |
 | **Downstream Consumers** | Phase 14.5 Exact Matching, Phase 14.6 Partial Matching, Phase 14.7 Multi-Invoice Matching |
-| **Financial State Mutation Risk** | **0.00%** (Strictly Read-Only Evaluation, 0 DB Writes, `len(db.dirty) == 0`) |
+| **Observed Financial Mutation** | **NONE** (Strictly Read-Only Evaluation, 0 DB Writes, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless in-memory domain evaluation & query optimization) |
 | **New Phase 14.4 Tests** | **39 New Automated Tests** across 5 test files (100% Pass Rate) |
 | **Reconciliation Suite** | **112 Total Tests Passed** across reconciliation test suite (0 Failures) |

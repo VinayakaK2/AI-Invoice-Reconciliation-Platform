@@ -9,7 +9,7 @@
 | **Architecture Pattern** | Modular Monolith + Clean Architecture + DDD Lite |
 | **Upstream Contract** | Phase 13 Payment & Bank Statement Management (**FROZEN**) |
 | **Downstream Consumers** | Phase 14.2 Counterparty Identification & Phase 14.3 Candidate Invoice Generation |
-| **Financial State Mutation Risk** | **0.00%** (Strictly Read-Only Diagnostic Gateway, 0 Session Mutations) |
+| **Observed Financial Mutation** | **NONE** (Strictly Read-Only Diagnostic Gateway, 0 Session Mutations, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless & Recomputable) |
 | **New Phase 14.1 Tests** | **24 New Automated Tests** across 3 test files (100% Pass Rate) |
 | **Reconciliation Suite** | **73 Total Tests Passed** across 14 reconciliation test files (0 Failures) |

@@ -9,12 +9,18 @@ from app.core.database import get_db
 from app.modules.auth.domain.entities import User
 from app.modules.auth.presentation.dependencies import get_current_user
 from app.modules.reconciliation.application.use_cases import (
+    BatchExactMatchUseCase,
     BatchIdentifyPaymentCustomersUseCase,
     BatchIntakePaymentUseCase,
+    BatchMultiInvoiceMatchUseCase,
+    BatchPartialMatchUseCase,
+    ExactMatchUseCase,
     FilterCandidateInvoicesUseCase,
     GenerateCandidateInvoicesUseCase,
     IdentifyPaymentCustomerUseCase,
     IntakePaymentUseCase,
+    MultiInvoiceMatchUseCase,
+    PartialMatchUseCase,
 )
 from app.modules.reconciliation.domain.candidate_filters import (
     CandidateFilterCriteria,
@@ -30,6 +36,24 @@ from app.modules.reconciliation.domain.entities import (
     CustomerMatchCandidate,
     EvidenceSignal,
 )
+from app.modules.reconciliation.domain.exact_matching import (
+    ExactMatchCriteria,
+    ExactMatchHypothesis,
+    ExactMatchResult,
+    ExactMatchStatus,
+)
+from app.modules.reconciliation.domain.partial_matching import (
+    PartialMatchCriteria,
+    PartialMatchHypothesis,
+    PartialMatchResult,
+    PartialMatchStatus,
+)
+from app.modules.reconciliation.domain.multi_invoice_matching import (
+    MultiInvoiceMatchCriteria,
+    MultiInvoiceMatchHypothesis,
+    MultiInvoiceMatchResult,
+    MultiInvoiceMatchStatus,
+)
 from app.modules.reconciliation.domain.invoice_rules import CandidateInvoiceRuleEngine
 from app.modules.reconciliation.domain.payment_intake import PaymentIntakeResult
 from app.modules.reconciliation.infrastructure.adapters import (
@@ -40,6 +64,12 @@ from app.modules.reconciliation.infrastructure.adapters import (
 from app.modules.reconciliation.presentation.schemas import (
     BatchCustomerIdentificationRequest,
     BatchCustomerIdentificationResponse,
+    BatchExactMatchRequest,
+    BatchExactMatchResponse,
+    BatchMultiInvoiceMatchRequest,
+    BatchMultiInvoiceMatchResponse,
+    BatchPartialMatchRequest,
+    BatchPartialMatchResponse,
     BatchPaymentIntakeRequest,
     BatchPaymentIntakeResponse,
     CandidateFilterCriteriaRequest,
@@ -49,9 +79,24 @@ from app.modules.reconciliation.presentation.schemas import (
     CustomerCandidateResponse,
     CustomerIdentificationResponse,
     EvidenceSignalResponse,
+    ExactMatchCriteriaRequest,
+    ExactMatchEvidenceSignalResponse,
+    ExactMatchHypothesisResponse,
+    ExactMatchRequest,
+    ExactMatchResponse,
     ExcludedCandidateResponse,
     FilteredCandidateUniverseResponse,
     GenerateCandidateInvoicesRequest,
+    MultiInvoiceMatchCriteriaRequest,
+    MultiInvoiceMatchEvidenceSignalResponse,
+    MultiInvoiceMatchHypothesisResponse,
+    MultiInvoiceMatchRequest,
+    MultiInvoiceMatchResponse,
+    PartialMatchCriteriaRequest,
+    PartialMatchEvidenceSignalResponse,
+    PartialMatchHypothesisResponse,
+    PartialMatchRequest,
+    PartialMatchResponse,
     PaymentIntakeResponse,
     mask_bank_account,
     mask_evidence_matched_value,
@@ -496,6 +541,663 @@ def filter_candidate_invoices(
     return {
         "success": True,
         "data": _map_filtered_universe_to_response(universe),
+    }
+
+
+def _map_exact_match_hypothesis_to_response(
+    hypothesis: ExactMatchHypothesis,
+) -> ExactMatchHypothesisResponse:
+    """Map ExactMatchHypothesis domain entity to presentation response schema."""
+    return ExactMatchHypothesisResponse(
+        invoice_id=hypothesis.invoice_id,
+        invoice_number=hypothesis.invoice_number,
+        matched_amount=str(hypothesis.matched_amount),
+        invoice_outstanding_before=str(hypothesis.invoice_outstanding_before),
+        invoice_outstanding_after=str(hypothesis.invoice_outstanding_after),
+        payment_unallocated_before=str(hypothesis.payment_unallocated_before),
+        payment_unallocated_after=str(hypothesis.payment_unallocated_after),
+        currency=hypothesis.currency,
+        match_type=hypothesis.match_type,
+        is_reference_match=hypothesis.is_reference_match,
+        date_difference_days=hypothesis.date_difference_days,
+        evidence_signals=[
+            ExactMatchEvidenceSignalResponse(
+                evidence_type=sig.evidence_type.value,
+                signal_strength=sig.signal_strength.value,
+                description=sig.description,
+                matched_value=sig.matched_value,
+                source_field=sig.source_field,
+                weight=sig.weight,
+                metadata=sig.metadata,
+            )
+            for sig in hypothesis.evidence_signals
+        ],
+    )
+
+
+def _map_exact_match_result_to_response(
+    result: ExactMatchResult,
+) -> ExactMatchResponse:
+    """Map ExactMatchResult domain aggregate to presentation response schema."""
+    matched_dto = (
+        _map_exact_match_hypothesis_to_response(result.matched_candidate)
+        if result.matched_candidate
+        else None
+    )
+    competing_dtos = [
+        _map_exact_match_hypothesis_to_response(c) for c in result.competing_candidates
+    ]
+
+    return ExactMatchResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        customer_id=result.customer_id,
+        status=result.status.value,
+        matched_candidate=matched_dto,
+        competing_candidates=competing_dtos,
+        total_exact_candidates_found=result.total_exact_candidates_found,
+        reason_code=result.reason_code.value,
+        reason_description=result.reason_description,
+        is_universe_truncated=result.is_universe_truncated,
+        candidate_count_evaluated=result.candidate_count_evaluated,
+        is_deterministic=result.is_deterministic,
+        evaluated_at=result.evaluated_at.isoformat(),
+    )
+
+
+@router.post(
+    "/exact-match/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def evaluate_exact_match(
+    payment_id: UUID,
+    payload: Optional[ExactMatchRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Deterministically evaluate 1:1 exact matching for a single payment.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Rule 4).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Returns structured match hypothesis and diagnostic reason code.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    use_case = ExactMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+
+    criteria = None
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.criteria:
+            criteria = ExactMatchCriteria(
+                amount_tolerance=payload.criteria.amount_tolerance,
+                require_exact_currency=payload.criteria.require_exact_currency,
+                date_proximity_days=payload.criteria.date_proximity_days,
+            )
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_exact_match_result_to_response(result),
+    }
+
+
+@router.post(
+    "/exact-match-batch",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def batch_evaluate_exact_matches(
+    payload: BatchExactMatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Batch evaluate 1:1 exact matching across unreconciled payments for tenant.
+
+    Bounded to max 100 payments per batch. Strictly zero financial mutation.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    exact_match_use_case = ExactMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    batch_use_case = BatchExactMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        exact_match_use_case=exact_match_use_case,
+    )
+
+    criteria = None
+    filter_criteria = None
+
+    if payload.criteria:
+        criteria = ExactMatchCriteria(
+            amount_tolerance=payload.criteria.amount_tolerance,
+            require_exact_currency=payload.criteria.require_exact_currency,
+            date_proximity_days=payload.criteria.date_proximity_days,
+        )
+    if payload.filter_criteria:
+        fc = payload.filter_criteria
+        statuses = (
+            set(fc.allowed_statuses)
+            if fc.allowed_statuses is not None
+            else {"PENDING", "PARTIALLY_PAID"}
+        )
+        filter_criteria = CandidateFilterCriteria(
+            min_amount=fc.min_amount,
+            max_amount=fc.max_amount,
+            max_lookback_days=fc.max_lookback_days,
+            max_advance_days=fc.max_advance_days,
+            require_causality=fc.require_causality,
+            allowed_statuses=statuses,
+            require_reference_match=fc.require_reference_match,
+            disallow_overpayment=fc.disallow_overpayment,
+            max_candidates=fc.max_candidates,
+        )
+
+    results = batch_use_case.execute(
+        company_id=current_user.company_id,
+        payment_ids=payload.payment_ids,
+        limit=payload.limit,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+    )
+
+    dto_results = [_map_exact_match_result_to_response(r) for r in results]
+    exact_count = sum(1 for r in results if r.status == ExactMatchStatus.EXACT_MATCH)
+    ambiguous_count = sum(
+        1 for r in results if r.status == ExactMatchStatus.AMBIGUOUS_EXACT_MATCH
+    )
+    no_match_count = sum(1 for r in results if r.status == ExactMatchStatus.NO_EXACT_MATCH)
+
+    return {
+        "success": True,
+        "data": BatchExactMatchResponse(
+            results=dto_results,
+            total_evaluated=len(dto_results),
+            exact_matches_found=exact_count,
+            ambiguous_matches_found=ambiguous_count,
+            no_matches_found=no_match_count,
+        ),
+    }
+
+
+def _map_partial_match_hypothesis_to_response(
+    hypothesis: PartialMatchHypothesis,
+) -> PartialMatchHypothesisResponse:
+    """Map PartialMatchHypothesis domain entity to presentation response schema."""
+    return PartialMatchHypothesisResponse(
+        invoice_id=hypothesis.invoice_id,
+        invoice_number=hypothesis.invoice_number,
+        matched_amount=str(hypothesis.matched_amount),
+        invoice_outstanding_before=str(hypothesis.invoice_outstanding_before),
+        invoice_outstanding_after=str(hypothesis.invoice_outstanding_after),
+        payment_unallocated_before=str(hypothesis.payment_unallocated_before),
+        payment_unallocated_after=str(hypothesis.payment_unallocated_after),
+        currency=hypothesis.currency,
+        match_type=hypothesis.match_type,
+        is_reference_match=hypothesis.is_reference_match,
+        date_difference_days=hypothesis.date_difference_days,
+        evidence_signals=[
+            PartialMatchEvidenceSignalResponse(
+                evidence_type=sig.evidence_type.value,
+                signal_strength=sig.signal_strength.value,
+                description=sig.description,
+                matched_value=sig.matched_value,
+                source_field=sig.source_field,
+                weight=sig.weight,
+                metadata=sig.metadata,
+            )
+            for sig in hypothesis.evidence_signals
+        ],
+    )
+
+
+def _map_partial_match_result_to_response(
+    result: PartialMatchResult,
+) -> PartialMatchResponse:
+    """Map PartialMatchResult domain aggregate to presentation response schema."""
+    matched_dto = (
+        _map_partial_match_hypothesis_to_response(result.matched_candidate)
+        if result.matched_candidate
+        else None
+    )
+    competing_dtos = [
+        _map_partial_match_hypothesis_to_response(c) for c in result.competing_candidates
+    ]
+
+    return PartialMatchResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        customer_id=result.customer_id,
+        status=result.status.value,
+        matched_candidate=matched_dto,
+        competing_candidates=competing_dtos,
+        total_partial_candidates_found=result.total_partial_candidates_found,
+        reason_code=result.reason_code.value,
+        reason_description=result.reason_description,
+        is_universe_truncated=result.is_universe_truncated,
+        candidate_count_evaluated=result.candidate_count_evaluated,
+        is_deterministic=result.is_deterministic,
+        evaluated_at=result.evaluated_at.isoformat(),
+    )
+
+
+@router.post(
+    "/partial-match/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def evaluate_partial_match(
+    payment_id: UUID,
+    payload: Optional[PartialMatchRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Deterministically evaluate 1:1 partial matching for a single payment.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Rule 4).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Returns structured match hypothesis and diagnostic reason code.
+    - Single invoice scope: does not perform multi-invoice combination matching (Phase 14.7).
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    use_case = PartialMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+
+    criteria = None
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.criteria:
+            criteria = PartialMatchCriteria(
+                amount_tolerance=payload.criteria.amount_tolerance,
+                require_exact_currency=payload.criteria.require_exact_currency,
+                date_proximity_days=payload.criteria.date_proximity_days,
+            )
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_partial_match_result_to_response(result),
+    }
+
+
+@router.post(
+    "/partial-match-batch",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def batch_evaluate_partial_matches(
+    payload: BatchPartialMatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Batch evaluate 1:1 partial matching across unreconciled payments for tenant.
+
+    Bounded to max 100 payments per batch. Strictly zero financial mutation.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    partial_match_use_case = PartialMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    batch_use_case = BatchPartialMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        partial_match_use_case=partial_match_use_case,
+    )
+
+    criteria = None
+    filter_criteria = None
+
+    if payload.criteria:
+        criteria = PartialMatchCriteria(
+            amount_tolerance=payload.criteria.amount_tolerance,
+            require_exact_currency=payload.criteria.require_exact_currency,
+            date_proximity_days=payload.criteria.date_proximity_days,
+        )
+    if payload.filter_criteria:
+        fc = payload.filter_criteria
+        statuses = (
+            set(fc.allowed_statuses)
+            if fc.allowed_statuses is not None
+            else {"PENDING", "PARTIALLY_PAID"}
+        )
+        filter_criteria = CandidateFilterCriteria(
+            min_amount=fc.min_amount,
+            max_amount=fc.max_amount,
+            max_lookback_days=fc.max_lookback_days,
+            max_advance_days=fc.max_advance_days,
+            require_causality=fc.require_causality,
+            allowed_statuses=statuses,
+            require_reference_match=fc.require_reference_match,
+            disallow_overpayment=fc.disallow_overpayment,
+            max_candidates=fc.max_candidates,
+        )
+
+    results = batch_use_case.execute(
+        company_id=current_user.company_id,
+        payment_ids=payload.payment_ids,
+        limit=payload.limit,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+    )
+
+    dto_results = [_map_partial_match_result_to_response(r) for r in results]
+    partial_count = sum(1 for r in results if r.status == PartialMatchStatus.PARTIAL_MATCH)
+    ambiguous_count = sum(
+        1 for r in results if r.status == PartialMatchStatus.AMBIGUOUS_PARTIAL_MATCH
+    )
+    no_match_count = sum(1 for r in results if r.status == PartialMatchStatus.NO_PARTIAL_MATCH)
+
+    return {
+        "success": True,
+        "data": BatchPartialMatchResponse(
+            results=dto_results,
+            total_evaluated=len(dto_results),
+            partial_matches_found=partial_count,
+            ambiguous_matches_found=ambiguous_count,
+            no_matches_found=no_match_count,
+        ),
+    }
+
+
+def _map_multi_invoice_hypothesis_to_response(
+    hypothesis: MultiInvoiceMatchHypothesis,
+) -> MultiInvoiceMatchHypothesisResponse:
+    """Map MultiInvoiceMatchHypothesis domain entity to presentation response schema."""
+    return MultiInvoiceMatchHypothesisResponse(
+        invoice_ids=hypothesis.invoice_ids,
+        invoice_numbers=hypothesis.invoice_numbers,
+        matched_amount=str(hypothesis.matched_amount),
+        invoices_outstanding_before=[str(amt) for amt in hypothesis.invoices_outstanding_before],
+        invoices_outstanding_after=[str(amt) for amt in hypothesis.invoices_outstanding_after],
+        payment_unallocated_before=str(hypothesis.payment_unallocated_before),
+        payment_unallocated_after=str(hypothesis.payment_unallocated_after),
+        currency=hypothesis.currency,
+        match_type=hypothesis.match_type,
+        combination_size=hypothesis.combination_size,
+        has_reference_match=hypothesis.has_reference_match,
+        matched_reference_count=hypothesis.matched_reference_count,
+        max_date_difference_days=hypothesis.max_date_difference_days,
+        evidence_signals=[
+            MultiInvoiceMatchEvidenceSignalResponse(
+                evidence_type=sig.evidence_type.value,
+                signal_strength=sig.signal_strength.value,
+                description=sig.description,
+                matched_value=sig.matched_value,
+                source_field=sig.source_field,
+                weight=sig.weight,
+                metadata=sig.metadata,
+            )
+            for sig in hypothesis.evidence_signals
+        ],
+    )
+
+
+def _map_multi_invoice_match_result_to_response(
+    result: MultiInvoiceMatchResult,
+) -> MultiInvoiceMatchResponse:
+    """Map MultiInvoiceMatchResult domain aggregate to presentation response schema."""
+    matched_dto = (
+        _map_multi_invoice_hypothesis_to_response(result.matched_combination)
+        if result.matched_combination
+        else None
+    )
+    competing_dtos = [
+        _map_multi_invoice_hypothesis_to_response(c) for c in result.competing_combinations
+    ]
+
+    return MultiInvoiceMatchResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        customer_id=result.customer_id,
+        status=result.status.value,
+        matched_combination=matched_dto,
+        competing_combinations=competing_dtos,
+        total_combinations_found=result.total_combinations_found,
+        reason_code=result.reason_code.value,
+        reason_description=result.reason_description,
+        is_universe_truncated=result.is_universe_truncated,
+        candidate_count_evaluated=result.candidate_count_evaluated,
+        is_deterministic=result.is_deterministic,
+        evaluated_at=result.evaluated_at.isoformat(),
+    )
+
+
+@router.post(
+    "/multi-invoice-match/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def evaluate_multi_invoice_match(
+    payment_id: UUID,
+    payload: Optional[MultiInvoiceMatchRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Deterministically evaluate multi-invoice matching (1:N) for a single payment.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Rule 4).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Returns structured match hypothesis and diagnostic reason code.
+    - Preserves ambiguity when multiple distinct combinations sum to payment amount.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    use_case = MultiInvoiceMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+
+    criteria = None
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.criteria:
+            criteria = MultiInvoiceMatchCriteria(
+                max_combination_size=payload.criteria.max_combination_size,
+                amount_tolerance=payload.criteria.amount_tolerance,
+                require_exact_currency=payload.criteria.require_exact_currency,
+                date_proximity_days=payload.criteria.date_proximity_days,
+            )
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_multi_invoice_match_result_to_response(result),
+    }
+
+
+@router.post(
+    "/multi-invoice-match-batch",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def batch_evaluate_multi_invoice_matches(
+    payload: BatchMultiInvoiceMatchRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Batch evaluate multi-invoice matching (1:N) across unreconciled payments for tenant.
+
+    Bounded to max 100 payments per batch. Strictly zero financial mutation.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    multi_invoice_match_use_case = MultiInvoiceMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    batch_use_case = BatchMultiInvoiceMatchUseCase(
+        payment_lookup_port=payment_adapter,
+        multi_invoice_match_use_case=multi_invoice_match_use_case,
+    )
+
+    criteria = None
+    filter_criteria = None
+
+    if payload.criteria:
+        criteria = MultiInvoiceMatchCriteria(
+            max_combination_size=payload.criteria.max_combination_size,
+            amount_tolerance=payload.criteria.amount_tolerance,
+            require_exact_currency=payload.criteria.require_exact_currency,
+            date_proximity_days=payload.criteria.date_proximity_days,
+        )
+    if payload.filter_criteria:
+        fc = payload.filter_criteria
+        statuses = (
+            set(fc.allowed_statuses)
+            if fc.allowed_statuses is not None
+            else {"PENDING", "PARTIALLY_PAID"}
+        )
+        filter_criteria = CandidateFilterCriteria(
+            min_amount=fc.min_amount,
+            max_amount=fc.max_amount,
+            max_lookback_days=fc.max_lookback_days,
+            max_advance_days=fc.max_advance_days,
+            require_causality=fc.require_causality,
+            allowed_statuses=statuses,
+            require_reference_match=fc.require_reference_match,
+            disallow_overpayment=fc.disallow_overpayment,
+            max_candidates=fc.max_candidates,
+        )
+
+    results = batch_use_case.execute(
+        company_id=current_user.company_id,
+        payment_ids=payload.payment_ids,
+        limit=payload.limit,
+        criteria=criteria,
+        filter_criteria=filter_criteria,
+    )
+
+    dto_results = [_map_multi_invoice_match_result_to_response(r) for r in results]
+    multi_count = sum(1 for r in results if r.status == MultiInvoiceMatchStatus.MULTI_INVOICE_MATCH)
+    ambiguous_count = sum(
+        1 for r in results if r.status == MultiInvoiceMatchStatus.AMBIGUOUS_MULTI_INVOICE_MATCH
+    )
+    no_match_count = sum(1 for r in results if r.status == MultiInvoiceMatchStatus.NO_MULTI_INVOICE_MATCH)
+
+    return {
+        "success": True,
+        "data": BatchMultiInvoiceMatchResponse(
+            results=dto_results,
+            total_evaluated=len(dto_results),
+            multi_invoice_matches_found=multi_count,
+            ambiguous_matches_found=ambiguous_count,
+            no_matches_found=no_match_count,
+        ),
     }
 
 

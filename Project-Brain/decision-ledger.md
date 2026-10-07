@@ -172,3 +172,69 @@ This ledger documents the frozen architectural decisions made for the platform.
      `POST /api/v1/reconciliation/candidates/{payment_id}` enforces JWT company context; cross-tenant payment requests fail-closed with HTTP 404.
 - **Consequences**: 25 new tests added (74 total reconciliation tests, 231 total platform tests passing, 93% platform coverage). Delivers a deterministic, bounded, and audited candidate pool ready for Phase 13.3 combinatorial matching.
 
+---
+
+## ADR-012: Deterministic Candidate Filtering Pipeline & Fail-Closed Exclusion Taxonomy
+- **Date**: 2026-09-08
+- **Status**: Accepted / Frozen
+- **Context**: Phase 14.3 Candidate Invoice Generation retrieves candidate invoices from a customer's open book. However, before matching algorithms can evaluate pairing, the raw candidate pool must be strictly pruned to eliminate non-viable candidates (e.g. cross-tenant bleed, archived customers, archived invoices, currency mismatches, invalid states, broken balance conservation, outside lookback window, or duplicates). Crucially, filtering must preserve candidates eligible for downstream partial matching (Phase 14.6) and multi-invoice matching (Phase 14.7) without premature truncation.
+- **Decision**:
+  1. **Strict 11-Gate Fail-Closed Pipeline**: Evaluates candidate invoices across 11 deterministic gates: (1) Tenant match, (2) Customer match, (3) Customer archival status, (4) Invoice archival status, (5) ISO currency match, (6) Operational invoice status (`PENDING` or `PARTIALLY_PAID`), (7) Balance conservation & non-negative balance, (8) Amount policy bounds, (9) Date temporal causality & lookback window, (10) Reference match constraints, and (11) Stream deduplication.
+  2. **18-Code Reason Taxonomy**: Every excluded invoice is explicitly tracked with a reason code (`FilterExclusionReason`) and human-readable diagnostic message in `universe.excluded_candidates`.
+  3. **Non-Interference with Partial and Multi-Invoice**: Underpayments ($\text{payment} < \text{outstanding}$) and overpayments ($\text{payment} > \text{outstanding}$) are preserved in `retained_candidates` for downstream phases.
+  4. **5-Key Deterministic Sorting Prior to Bounding**: Sorted by `retrieval_priority` DESC, `is_exact_amount_match` DESC, `is_reference_match` DESC, `due_date` ASC, and `invoice_id` ASC. Permutation invariance verified across 100 random shuffles.
+  5. **Zero Financial Mutation**: Strict read-only in-memory domain evaluation. Session dirty checking confirms `len(db.dirty) == 0`.
+- **Consequences**: Rock-solid deterministic pruning substrate with 31 automated tests (348 total platform tests passing) feeding directly into Phase 14.5.
+
+---
+
+## ADR-013: Deterministic Exact Matching (1:1) Engine & Incomplete Universe Defense
+- **Date**: 2026-09-10
+- **Status**: Accepted / Frozen
+- **Context**: The reconciliation engine requires a deterministic, 100% auditable 1:1 matching fact to decide whether an incoming bank statement payment matches exactly one open invoice from the filtered candidate universe. The engine must strictly compare against authoritative outstanding balances (not gross totals), prevent arbitrary tie-breaking when duplicate amount invoices exist, guard against false certainty when candidate universes are bounded/truncated, and maintain absolute zero financial mutation.
+- **Decision**:
+  1. **Strict Tripartite Matching Status**: The engine produces an objective matching fact: `EXACT_MATCH`, `NO_EXACT_MATCH`, or `AMBIGUOUS_EXACT_MATCH`.
+  2. **Authoritative Balance Comparator**: Strict `Decimal` equality between `payment.effective_amount` and `candidate.outstanding_amount` under identical ISO currencies. Never compares against original invoice total when partial payments have already occurred ($P > 0$).
+  3. **Zero Floating-Point & Zero FX Conversion**: Rejects binary floats and strictly refuses cross-currency evaluation.
+  4. **Strict Ambiguity Preservation (Prohibition of Autonomous Disambiguation)**: In accordance with `business-rules.md` §2.5 line 64, if multiple candidates match the payment amount, the engine unconditionally emits `AMBIGUOUS_EXACT_MATCH` (`MULTIPLE_EXACT_AMOUNT_MATCHES`) with `matched_candidate = None` and records all matching candidates in `competing_candidates`. Autonomous reference tie-breaking is strictly prohibited. Reference match signals and evidence items are preserved on competing hypotheses for human review.
+  5. **Incomplete Universe Defense**: If the candidate universe was truncated ($K \le 30$) and a single exact match candidate lacks an explicit invoice number reference match, the engine emits `AMBIGUOUS_EXACT_MATCH` (`TRUNCATED_UNIVERSE_AMBIGUITY`) because unretrieved invoices could share the same balance. The engine also scans `universe.excluded_candidates` for amount collisions under `TRUNCATED_BY_LIMIT`.
+  6. **4-Key Deterministic Non-Scoring Comparator**: Hypotheses are sorted by `(not is_reference_match, date_difference_days, invoice_number, invoice_id)` ensuring strict 100-run permutation invariance without premature Phase 14.11 numeric scoring.
+  7. **Separation of Concerns**: Matching Fact $\neq$ Scoring $\neq$ Confidence $\neq$ Approval $\neq$ Mutation. Composite heuristic scoring (`match_score`) was eliminated from Phase 14.5 and deferred to Phase 14.11. The engine never modifies database rows (`len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`).
+  8. **Multi-Tenant Fail-Closed Security**: Endpoint `POST /api/v1/reconciliation/exact-match/{payment_id}` enforces JWT company context; cross-tenant payments or customer overrides return HTTP 404.
+- **Consequences**: Certified deterministic 1:1 matching engine with 32 automated tests (388 total platform tests passing, 0 failures, 85.73s runtime), with B-01 (Premature Scoring) and B-02 (Autonomous Disambiguation) fully remediated, verified, audited, and frozen for Phase 14.5. Downstream Phase 14.6 (Partial Matching) and Phase 14.7 (Multi-Invoice Matching) will build upon this foundation.
+
+---
+
+## ADR-014: Deterministic Partial Payment Matching (1:1) Engine & Ambiguity Preservation
+- **Date**: 2026-09-19
+- **Status**: Accepted / Frozen
+- **Context**: The reconciliation pipeline requires an objective, deterministic capability to evaluate whether an incoming payment represents a partial payment against a single open invoice ($0 < \text{payment.effective\_amount} < \text{candidate.outstanding\_amount}$). The engine must compute hypothetical applied and remaining amounts with exact Decimal precision, strictly decouple matching evaluation from financial mutation, prevent arbitrary candidate selection when multiple open invoices can accept the payment, and guard against incomplete universe truncation risk.
+- **Decision**:
+  1. **Strict Tripartite Matching Status**: The engine produces an objective matching fact: `PARTIAL_MATCH`, `NO_PARTIAL_MATCH`, or `AMBIGUOUS_PARTIAL_MATCH`.
+  2. **Authoritative Balance Comparator**: Evaluates $0 < \text{payment.effective\_amount} < \text{candidate.outstanding\_amount}$ using strict `Decimal` arithmetic. Evaluates against `candidate.outstanding_amount`, never original total amount if prior partial payments exist.
+  3. **Zero Financial Mutation**: Strictly in-memory evaluation producing matching hypotheses. No writes to invoices, payments, allocations, or ledgers. Verified via session dirty checking (`len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`).
+  4. **Single-Invoice Scope Only**: Partial matching evaluates candidates individually ($1:1$). Multi-invoice combination matching ($\text{payment} = \text{INV}_1 + \text{INV}_2$) is strictly reserved for Phase 14.7.
+  5. **Exact Match Non-Interference**: If $\text{payment} == \text{outstanding}$, returns `NO_PARTIAL_MATCH` with reason `EXACT_MATCH_DETECTED` (governed by Phase 14.5). If $\text{payment} > \text{outstanding}$, returns `NO_PARTIAL_MATCH` with reason `OVERPAYMENT_DETECTED` (deferred to Phase 14.7).
+  6. **Strict Ambiguity Preservation**: When multiple candidate invoices have outstanding balance greater than the payment (`total_partial_found > 1`), the engine unconditionally emits `AMBIGUOUS_PARTIAL_MATCH` (`MULTIPLE_PARTIAL_CANDIDATES`) with `matched_candidate = None` and populates all hypotheses in `competing_candidates`. Autonomous reference tie-breaking is strictly prohibited.
+  7. **Incomplete Universe Defense**: If the candidate universe was truncated ($K \le 30$) and a single partial candidate lacks an explicit reference match, emits `AMBIGUOUS_PARTIAL_MATCH` (`TRUNCATED_UNIVERSE_AMBIGUITY`). Excluded candidates are also scanned for partial eligibility under `TRUNCATED_BY_LIMIT`.
+  8. **Deterministic Total Order**: Hypotheses are sorted by `(not is_reference_match, date_difference_days, invoice_number, invoice_id)` ensuring strict 100-run permutation invariance.
+  9. **No Premature Scoring**: No composite `match_score` is computed; factual structured evidence signals are emitted only.
+- **Consequences**: Certified deterministic 1:1 partial matching engine with 32 automated tests (420 total platform tests passing, 0 failures, 91.04s runtime), verified, audited, and frozen for Phase 14.6. Downstream Phase 14.7 (Multi-Invoice Matching) will build upon this foundation.
+
+---
+
+## ADR-015: Deterministic Multi-Invoice Matching (1:N) Engine & Combinatorial Safety
+- **Date**: 2026-09-19
+- **Status**: Accepted / Frozen
+- **Context**: The reconciliation pipeline requires an objective, deterministic capability to evaluate whether an incoming payment represents an exact settlement for a combination of multiple open invoices ($\sum_{i=1}^k \text{candidate}_i\text{.outstanding\_amount} == \text{payment.effective\_amount}$, $2 \le k \le 4$). The engine must compute subset sums with exact Decimal precision, strictly decouple matching evaluation from financial mutation, prevent arbitrary combination selection when multiple distinct subsets sum to the payment, bound combinatorial search complexity, and guard against incomplete universe truncation risk.
+- **Decision**:
+  1. **Strict Tripartite Matching Status**: The engine produces an objective matching fact: `MULTI_INVOICE_MATCH`, `NO_MULTI_INVOICE_MATCH`, or `AMBIGUOUS_MULTI_INVOICE_MATCH`.
+  2. **Authoritative Subset-Sum Comparator**: Evaluates $\sum_{i=1}^k \text{candidate}_i\text{.outstanding\_amount} == \text{payment.effective\_amount}$ where $2 \le k \le \text{max\_combination\_size}$ (default 4). Uses strict `Decimal` arithmetic, evaluating against `candidate.outstanding_amount`, never original total amounts if prior partial payments exist.
+  3. **Zero Financial Mutation**: Strictly in-memory evaluation producing matching hypotheses. No writes to invoices, payments, allocations, or ledgers. Verified via session dirty checking (`len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`).
+  4. **Multi-Invoice Scope Only (1:N, $k \ge 2$)**: Multi-invoice matching evaluates combinations of 2 or more candidates. Single-invoice exact matches ($k=1$) are diagnosed as `EXACT_MATCH_DETECTED` (governed by Phase 14.5). Single-invoice partial matches ($k=1$) are diagnosed as `PARTIAL_MATCH_DETECTED` (governed by Phase 14.6). Generalized combination matching with aging/FIFO heuristics belongs to Phase 14.8.
+  5. **Combinatorial Complexity Bounding**: Enforces $2 \le k \le \text{max\_combination\_size} \le 10$ (default $k \le 4$) over the pre-filtered candidate universe ($n \le 30$). Total combinations checked is bounded to at most $\sum_{k=2}^4 \binom{30}{k} = 31,900$, executing in < 5ms.
+  6. **Strict Ambiguity Preservation**: When multiple distinct combinations of candidate invoices sum to the payment amount (`total_combinations_found > 1`), the engine unconditionally emits `AMBIGUOUS_MULTI_INVOICE_MATCH` (`MULTIPLE_MULTI_INVOICE_MATCHES`) with `matched_combination = None` and populates all hypotheses in `competing_combinations`. Autonomous tie-breaking across combinations or combination sizes is strictly prohibited.
+  7. **Incomplete Universe Defense**: If the candidate universe was truncated ($K \le 30$) and not all invoices in a single matching combination have explicit reference matches, emits `AMBIGUOUS_MULTI_INVOICE_MATCH` (`TRUNCATED_UNIVERSE_AMBIGUITY`).
+  8. **Deterministic Total Order**: Matching hypotheses are sorted by `(not has_reference_match, -matched_reference_count, combination_size, max_date_difference_days, tuple(invoice_numbers), tuple(invoice_ids))` ensuring strict 100-run permutation invariance.
+  9. **No Premature Scoring**: No composite `match_score` is computed; factual structured evidence signals are emitted only (`MULTI_INVOICE_SUM_EXACT`, `INVOICE_NUMBER_MATCH`, `CUSTOMER_NAME_MATCH`, `DATE_PROXIMITY_MATCH`).
+- **Consequences**: Certified deterministic 1:N multi-invoice matching engine with 33 automated tests (453 total platform tests passing, 0 failures, 137.07s runtime), verified, audited, and frozen for Phase 14.7. Downstream Phase 14.8 (Combination Matching) will build upon this foundation.
