@@ -261,7 +261,7 @@ This ledger documents the frozen architectural decisions made for the platform.
 
 ## ADR-017: Deterministic Evidence Collection Engine & Four-Tier Classification Layer
 - **Date**: 2026-10-07
-- **Status**: Accepted / Verification Pending
+- **Status**: Accepted / Frozen
 - **Context**: The reconciliation workflow requires an objective, bounded, read-only evidence collection layer that converts raw transaction and candidate invoice facts into structured, classified evidence items. The layer must distinguish direct, supporting, missing, and conflicting evidence without making financial decisions, without calculating composite scores (Phase 14.11), without probabilistic calibration (Phase 14.12), and with zero database mutations.
 - **Decision**:
   1. **Strict Four-Tier Classification**: Every extracted evidence item is strictly classified into `DIRECT` (high-fidelity explicit identifiers, exact amount equality, account match), `SUPPORTING` (contextual signals, partial amounts, name token overlap, aliases, UTR presence, date causality/proximity), `MISSING` (absent or unprovided signals without fabrication), or `CONFLICTING` (contradictory identifiers belonging to other customers, different invoice numbers explicitly mentioned in narration, non-causal payment dates, currency mismatch).
