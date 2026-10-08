@@ -276,7 +276,7 @@ This ledger documents the frozen architectural decisions made for the platform.
 
 ## ADR-018: Canonical Evidence Normalization Engine & Representation Standardization
 - **Date**: 2026-10-08
-- **Status**: Implemented / Ready for Independent Verification
+- **Status**: Accepted / Frozen
 - **Context**: Downstream matching, scoring, and confidence engines require a single, machine-readable, canonical, version-aware evidence representation. Upstream evidence collection (Phase 14.9) produces heterogeneous raw evidence items across payment, customer, and candidate contexts. The normalization layer must standardize types, sources, results, qualitative strengths, and entity identifiers without modifying factual meaning, without scoring, without assigning probabilities, and with zero database mutations.
 - **Decision**:
   1. **Canonical Evidence Schema**: Every raw evidence fact is converted into an immutable `CanonicalEvidenceObject` containing canonical `evidence_type` (NormalizedEvidenceType), `source` (NormalizedEvidenceSource), `result` (NormalizedEvidenceResult), `strength` (NormalizedEvidenceStrength), `details` (human-readable string explanation), `identifiers` (NormalizedRelevantIdentifiers), preserved `classification` (EvidenceClassification), `rule_version` ("1.0.0"), `algorithm_version` ("14.10.0"), and `target_entity` (PAYMENT, CUSTOMER, INVOICE, COMBINATION).
