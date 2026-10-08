@@ -66,6 +66,11 @@ from app.modules.reconciliation.domain.evidence_normalization import (
     EvidenceNormalizationEngine,
     EvidenceNormalizationResult,
 )
+from app.modules.reconciliation.domain.matching_scoring import (
+    MatchingScoringEngine,
+    MatchingScoringResult,
+    ScoringWeightsConfig,
+)
 from app.modules.reconciliation.domain.rules import PayerIdentificationRuleEngine
 from app.shared.exceptions import ForbiddenError, NotFoundError, ValidationError
 
@@ -1462,6 +1467,133 @@ class BatchEvidenceNormalizationUseCase:
                 results.append(res)
 
         return results
+
+
+# ==============================================================================
+# Phase 14.11 Matching & Scoring Application Use Cases
+# ==============================================================================
+
+
+class MatchingScoringUseCase:
+    """Application use case for Phase 14.11 Matching & Scoring.
+
+    Coordinates upstream Phase 14.10 Evidence Normalization and applies pure domain
+    scoring to evaluate canonical evidence objects and produce deterministic, explainable
+    candidate scores (0.00 to 100.00).
+
+    Guarantees:
+    - Zero financial accounting state mutation (Observed Financial Mutation: NONE).
+    - Multi-tenant fail-closed safety (strict scoping to authenticated company_id).
+    - Pure mathematical determinism and Decimal precision.
+    - Non-Decision: Scores only. Never applies money, never allocates, never transitions state.
+    """
+
+    def __init__(
+        self,
+        evidence_normalization_use_case: EvidenceNormalizationUseCase,
+        scoring_engine: Optional[MatchingScoringEngine] = None,
+    ) -> None:
+        self.evidence_normalization_use_case = evidence_normalization_use_case
+        self.scoring_engine = scoring_engine or MatchingScoringEngine()
+
+    def execute(
+        self,
+        payment_id: UUID,
+        company_id: UUID,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+        override_customer_id: Optional[UUID] = None,
+        scoring_config: Optional[ScoringWeightsConfig] = None,
+    ) -> MatchingScoringResult:
+        """Execute Phase 14.11 Matching & Scoring within authenticated tenant boundary."""
+        # 1. Execute upstream Phase 14.10 Evidence Normalization (inherits all candidate & tenant checks)
+        normalization_result = self.evidence_normalization_use_case.execute(
+            payment_id=payment_id,
+            company_id=company_id,
+            filter_criteria=filter_criteria,
+            override_customer_id=override_customer_id,
+        )
+
+        # 2. Configure scoring engine if custom configuration provided
+        engine = self.scoring_engine
+        if scoring_config is not None:
+            engine = MatchingScoringEngine(
+                config=scoring_config,
+                is_empirically_validated=self.scoring_engine.is_empirically_validated,
+            )
+
+        # 3. Evaluate deterministic scores across all normalized candidate bundles
+        return engine.evaluate(normalization_result=normalization_result)
+
+
+class BatchMatchingScoringUseCase:
+    """Batch evaluate matching scoring across multiple unreconciled payments.
+
+    Guarantees:
+    - Bounded to MAX_BATCH_SIZE = 100 payments.
+    - Zero financial accounting state mutation across all evaluated payments.
+    - Strict tenant isolation: all evaluated payments belong to authenticated company_id.
+    """
+
+    MAX_BATCH_SIZE = 100
+
+    def __init__(
+        self,
+        payment_lookup_port: PaymentLookupPort,
+        matching_scoring_use_case: MatchingScoringUseCase,
+    ) -> None:
+        self.payment_lookup_port = payment_lookup_port
+        self.matching_scoring_use_case = matching_scoring_use_case
+
+    def execute(
+        self,
+        company_id: UUID,
+        payment_ids: Optional[List[UUID]] = None,
+        limit: int = 50,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+        scoring_config: Optional[ScoringWeightsConfig] = None,
+    ) -> List[MatchingScoringResult]:
+        """Execute matching scoring evaluation across payments within tenant boundary."""
+        if limit < 1 or limit > self.MAX_BATCH_SIZE:
+            raise ValidationError(
+                f"Batch limit must be between 1 and {self.MAX_BATCH_SIZE}."
+            )
+
+        results: List[MatchingScoringResult] = []
+
+        if payment_ids:
+            if len(payment_ids) > self.MAX_BATCH_SIZE:
+                raise ValidationError(
+                    f"Requested {len(payment_ids)} payments exceeds maximum batch limit of {self.MAX_BATCH_SIZE}."
+                )
+            for p_id in payment_ids:
+                payment_context = self.payment_lookup_port.get_payment_intake_context(
+                    payment_id=p_id,
+                    company_id=company_id,
+                )
+                if payment_context:
+                    res = self.matching_scoring_use_case.execute(
+                        payment_id=p_id,
+                        company_id=company_id,
+                        filter_criteria=filter_criteria,
+                        scoring_config=scoring_config,
+                    )
+                    results.append(res)
+        else:
+            payment_contexts = self.payment_lookup_port.list_unreconciled_payment_contexts(
+                company_id=company_id,
+                limit=limit,
+            )
+            for payment_context in payment_contexts:
+                res = self.matching_scoring_use_case.execute(
+                    payment_id=payment_context.payment_id,
+                    company_id=company_id,
+                    filter_criteria=filter_criteria,
+                    scoring_config=scoring_config,
+                )
+                results.append(res)
+
+        return results
+
 
 
 

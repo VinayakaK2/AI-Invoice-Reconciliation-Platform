@@ -801,5 +801,82 @@ class EvidenceNormalizationResponse(BaseModel):
     normalized_at: str
 
 
+# ==============================================================================
+# Phase 14.11 Matching & Scoring Presentation Schemas
+# ==============================================================================
+
+
+class ScoreContributionResponse(BaseModel):
+    """Presentation DTO for a single traceable scoring contribution."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    signal_type: str
+    weight: str
+    applied: bool
+    evidence_type: str
+    source: str
+    result: str
+    reason: str
+    target_entity: str
+    matched_value: Optional[str] = None
+    expected_value: Optional[str] = None
+
+
+class CandidateScoreResponse(BaseModel):
+    """Presentation DTO for a candidate invoice's score evaluation outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_id: UUID
+    invoice_number: str
+    total_score: str
+    raw_unclamped_score: str
+    contributions: List[ScoreContributionResponse]
+    has_conflicting_evidence: bool
+    rule_version: str
+    algorithm_version: str
+    is_empirically_validated: bool
+
+
+class MatchingScoringRequest(BaseModel):
+    """Request payload for matching scoring evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class MatchingScoringResponse(BaseModel):
+    """Presentation DTO for complete Phase 14.11 Matching & Scoring outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    candidate_scores: List[CandidateScoreResponse]
+    total_candidates_scored: int
+    rule_version: str
+    algorithm_version: str
+    is_deterministic: bool
+    is_empirically_validated: bool
+    scored_at: str
+
+
+class BatchMatchingScoringRequest(BaseModel):
+    """Request payload for batch matching scoring evaluation."""
+
+    payment_ids: Optional[List[UUID]] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class BatchMatchingScoringResponse(BaseModel):
+    """Presentation response for batch matching scoring evaluation."""
+
+    results: List[MatchingScoringResponse]
+    total_evaluated: int
+
+
+
 
 

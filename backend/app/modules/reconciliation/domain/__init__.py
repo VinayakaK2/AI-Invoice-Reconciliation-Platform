@@ -75,6 +75,28 @@ from app.modules.reconciliation.domain.combination_matching import (
     CombinationMatchRuleEngine,
     CombinationMatchStatus,
 )
+from app.modules.reconciliation.domain.evidence_normalization import (
+    CanonicalEvidenceObject,
+    EvidenceNormalizationEngine,
+    EvidenceNormalizationResult,
+    NormalizedCandidateBundle,
+    NormalizedEvidenceResult,
+    NormalizedEvidenceSource,
+    NormalizedEvidenceStrength,
+    NormalizedEvidenceType,
+    NormalizedPaymentEvidenceContext,
+    NormalizedRelevantIdentifiers,
+    NormalizedTargetEntity,
+)
+from app.modules.reconciliation.domain.matching_scoring import (
+    DEFAULT_SCORING_WEIGHTS,
+    CandidateScoreResult,
+    MatchingScoringEngine,
+    MatchingScoringResult,
+    ScoreContribution,
+    ScoringSignalType,
+    ScoringWeightsConfig,
+)
 
 __all__ = [
     "IdentificationStatus",
@@ -132,5 +154,25 @@ __all__ = [
     "CombinationHypothesis",
     "CombinationMatchResult",
     "CombinationMatchRuleEngine",
+    # Phase 14.10 Evidence Normalization
+    "NormalizedEvidenceType",
+    "NormalizedEvidenceSource",
+    "NormalizedEvidenceResult",
+    "NormalizedEvidenceStrength",
+    "NormalizedTargetEntity",
+    "NormalizedRelevantIdentifiers",
+    "CanonicalEvidenceObject",
+    "NormalizedCandidateBundle",
+    "NormalizedPaymentEvidenceContext",
+    "EvidenceNormalizationResult",
+    "EvidenceNormalizationEngine",
+    # Phase 14.11 Matching & Scoring
+    "ScoringSignalType",
+    "ScoringWeightsConfig",
+    "ScoreContribution",
+    "CandidateScoreResult",
+    "MatchingScoringResult",
+    "MatchingScoringEngine",
+    "DEFAULT_SCORING_WEIGHTS",
 ]
 

@@ -27,6 +27,8 @@ from app.modules.reconciliation.application.use_cases import (
     BatchEvidenceCollectionUseCase,
     EvidenceNormalizationUseCase,
     BatchEvidenceNormalizationUseCase,
+    MatchingScoringUseCase,
+    BatchMatchingScoringUseCase,
 )
 from app.modules.reconciliation.domain.candidate_filters import (
     CandidateFilterCriteria,
@@ -128,8 +130,19 @@ from app.modules.reconciliation.presentation.schemas import (
     NormalizedPaymentEvidenceContextResponse,
     EvidenceNormalizationRequest,
     EvidenceNormalizationResponse,
+    ScoreContributionResponse,
+    CandidateScoreResponse,
+    MatchingScoringRequest,
+    MatchingScoringResponse,
+    BatchMatchingScoringRequest,
+    BatchMatchingScoringResponse,
     mask_bank_account,
     mask_evidence_matched_value,
+)
+from app.modules.reconciliation.domain.matching_scoring import (
+    CandidateScoreResult,
+    MatchingScoringResult,
+    ScoreContribution,
 )
 
 router = APIRouter(prefix="/reconciliation", tags=["Reconciliation"])
@@ -1751,6 +1764,219 @@ def normalize_evidence_for_payment(
     }
 
 
+# ==============================================================================
+# Phase 14.11 Matching & Scoring Mappers & Endpoints
+# ==============================================================================
 
 
+def _map_score_contribution_to_response(
+    contrib: ScoreContribution,
+) -> ScoreContributionResponse:
+    """Map domain ScoreContribution to presentation DTO with masked sensitive coordinates."""
+    masked_matched = mask_evidence_matched_value(
+        contrib.evidence_type.value,
+        contrib.matched_value,
+    )
+    masked_expected = mask_evidence_matched_value(
+        contrib.evidence_type.value,
+        contrib.expected_value,
+    )
+
+    return ScoreContributionResponse(
+        signal_type=contrib.signal_type.value,
+        weight=str(contrib.weight),
+        applied=contrib.applied,
+        evidence_type=contrib.evidence_type.value,
+        source=contrib.source.value,
+        result=contrib.result.value,
+        reason=contrib.reason,
+        target_entity=contrib.target_entity.value,
+        matched_value=masked_matched,
+        expected_value=masked_expected,
+    )
+
+
+def _map_candidate_score_to_response(
+    score_res: CandidateScoreResult,
+) -> CandidateScoreResponse:
+    """Map domain CandidateScoreResult to presentation DTO."""
+    return CandidateScoreResponse(
+        invoice_id=score_res.invoice_id,
+        invoice_number=score_res.invoice_number,
+        total_score=str(score_res.total_score),
+        raw_unclamped_score=str(score_res.raw_unclamped_score),
+        contributions=[_map_score_contribution_to_response(c) for c in score_res.contributions],
+        has_conflicting_evidence=score_res.has_conflicting_evidence,
+        rule_version=score_res.rule_version,
+        algorithm_version=score_res.algorithm_version,
+        is_empirically_validated=score_res.is_empirically_validated,
+    )
+
+
+def _map_matching_scoring_result_to_response(
+    result: MatchingScoringResult,
+) -> MatchingScoringResponse:
+    """Map domain MatchingScoringResult to presentation DTO."""
+    return MatchingScoringResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        candidate_scores=[_map_candidate_score_to_response(c) for c in result.candidate_scores],
+        total_candidates_scored=result.total_candidates_scored,
+        rule_version=result.rule_version,
+        algorithm_version=result.algorithm_version,
+        is_deterministic=result.is_deterministic,
+        is_empirically_validated=result.is_empirically_validated,
+        scored_at=result.scored_at.isoformat(),
+    )
+
+
+@router.post(
+    "/matching-scoring/batch",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def batch_score_payment_candidates(
+    payload: Optional[BatchMatchingScoringRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Batch calculate candidate scores across multiple unreconciled payments.
+
+    Guarantees:
+    - Bounded to max limit of 100 payments.
+    - Zero financial accounting state mutation.
+    - Strict tenant isolation: scoped to authenticated current_user.company_id.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    collection_use_case = EvidenceCollectionUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    normalization_use_case = EvidenceNormalizationUseCase(
+        evidence_collection_use_case=collection_use_case,
+    )
+    scoring_use_case = MatchingScoringUseCase(
+        evidence_normalization_use_case=normalization_use_case,
+    )
+    batch_use_case = BatchMatchingScoringUseCase(
+        payment_lookup_port=payment_adapter,
+        matching_scoring_use_case=scoring_use_case,
+    )
+
+    payment_ids = payload.payment_ids if payload else None
+    limit = payload.limit if payload else 50
+    filter_criteria = None
+
+    if payload and payload.filter_criteria:
+        fc = payload.filter_criteria
+        statuses = (
+            set(fc.allowed_statuses)
+            if fc.allowed_statuses is not None
+            else {"PENDING", "PARTIALLY_PAID"}
+        )
+        filter_criteria = CandidateFilterCriteria(
+            min_amount=fc.min_amount,
+            max_amount=fc.max_amount,
+            max_lookback_days=fc.max_lookback_days,
+            max_advance_days=fc.max_advance_days,
+            require_causality=fc.require_causality,
+            allowed_statuses=statuses,
+            require_reference_match=fc.require_reference_match,
+            disallow_overpayment=fc.disallow_overpayment,
+            max_candidates=fc.max_candidates,
+        )
+
+    results = batch_use_case.execute(
+        company_id=current_user.company_id,
+        payment_ids=payment_ids,
+        limit=limit,
+        filter_criteria=filter_criteria,
+    )
+
+    response_dtos = [_map_matching_scoring_result_to_response(r) for r in results]
+
+    return {
+        "success": True,
+        "data": {
+            "results": response_dtos,
+            "total_evaluated": len(response_dtos),
+        },
+    }
+
+
+@router.post(
+    "/matching-scoring/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def score_payment_candidates(
+    payment_id: UUID,
+    payload: Optional[MatchingScoringRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Calculate deterministic candidate scores (0.00 to 100.00) based on normalized evidence.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Observed Financial Mutation: NONE).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Pure Decimal arithmetic; bounds scores to [0.00, 100.00].
+    - Traceable score breakdown: explainable provenance for every applied contribution.
+    - Non-Decision: Scores only. Never outputs AUTO_ELIGIBLE, MATCH_SUGGESTED, or allocation.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    collection_use_case = EvidenceCollectionUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    normalization_use_case = EvidenceNormalizationUseCase(
+        evidence_collection_use_case=collection_use_case,
+    )
+    scoring_use_case = MatchingScoringUseCase(
+        evidence_normalization_use_case=normalization_use_case,
+    )
+
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = scoring_use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_matching_scoring_result_to_response(result),
+    }
 

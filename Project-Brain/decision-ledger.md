@@ -286,5 +286,38 @@ This ledger documents the frozen architectural decisions made for the platform.
   5. **Deduplication Without Data Loss**: Exact semantic duplicates are collapsed to a single entry, while distinct sources, entities, or explanations are preserved.
   6. **Serialized Payload Determinism**: Output candidate bundles are ordered by `(invoice_number, invoice_id)` and items by `(classification, evidence_type, source, target_entity, details)`. `to_deterministic_payload()` excludes non-deterministic execution metadata (`normalized_at`), guaranteeing bit-for-bit invariance across 100 random candidate permutations.
   7. **Multi-Tenant Fail-Closed Security**: `POST /api/v1/reconciliation/evidence-normalization/{payment_id}` enforces JWT tenant context. Cross-tenant payment access or customer overrides return HTTP 404. Cross-tenant candidates injected at use-case boundary fail closed with `ForbiddenError`.
-- **Consequences**: Certified deterministic evidence normalization engine with 18 automated unit and integration tests (12 unit, 6 integration/security). Forensic remediation completed: semantic preservation verified, invalid input handling fails closed, zero financial mutation verified, determinism verified across 100 permutations. Status: IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION. Downstream Phase 14.11 (Matching & Scoring) will consume this canonical evidence layer.
+- **Consequences**: Certified deterministic evidence normalization engine with 18 automated unit and integration tests (12 unit, 6 integration/security). Forensic remediation completed: semantic preservation verified, invalid input handling fails closed, zero financial mutation verified, determinism verified across 100 permutations. Status: FROZEN. Downstream Phase 14.11 (Matching & Scoring) will consume this canonical evidence layer.
+
+---
+
+## ADR-019: Deterministic Matching & Scoring Engine & Rule 2.4 Evidence Aggregation
+- **Date**: 2026-10-08
+- **Status**: Accepted / Frozen
+- **Context**: The reconciliation pipeline requires an objective, reproducible mathematical scoring layer to aggregate canonical normalized evidence (Phase 14.10) for candidate invoices into a bounded score between 0.00 and 100.00. The engine must adhere to Rule 2.4 weights, clamp total scores safely, suppress points when conflicting evidence exists, prevent double-counting across overlapping sources, award zero points for missing signals, maintain zero financial mutation, ensure fail-closed multi-tenancy, and strictly refrain from making financial disposition decisions (Phase 14.13) or probabilistic claims (Phase 14.12).
+- **Decision**:
+  1. **Strict Separation of Concerns**:
+     $$\text{Evidence Collection} \neq \text{Evidence Normalization} \neq \text{Matching \& Scoring} \neq \text{Confidence Calibration} \neq \text{Decision Engine} \neq \text{Financial Mutation}$$
+     A score is evidence aggregation. A score is NOT a financial decision. The engine outputs candidate match scores only, never emitting `AUTO_ELIGIBLE`, `MATCH_SUGGESTED`, or financial allocations.
+  2. **Rule 2.4 Baseline Scoring Weights**:
+     - `IDENTIFIER_MATCH`: +40.00 (bank account or UTR match)
+     - `INVOICE_NUMBER_MATCH`: +35.00 (invoice reference match)
+     - `AMOUNT_EXACT_MATCH`: +30.00 (exact balance match)
+     - `CUSTOMER_NAME_MATCH`: +20.00 (customer name / alias match)
+     - `DATE_PROXIMITY_MATCH`: +10.00 (causal date within 30 days)
+     - `HISTORICAL_PATTERN`: +5.00 (recurring pattern match)
+     Weights sum to 140.00 raw, clamped to [0.00, 100.00] using pure `Decimal` arithmetic.
+  3. **Provisional Empirical Validation Status**:
+     Rule 2.4 weights are provisional heuristics and have not yet undergone large-scale empirical machine learning or offline statistical calibration. The engine explicitly flags `is_empirically_validated = False` across all domain objects and API responses.
+  4. **Conflict Suppression & Zero Missing Credit**:
+     Any evidence classified as `MISSING` awards 0.00 points. Any active `CONFLICTING` evidence or conflicting canonical result suppresses the corresponding positive score contribution (`applied = False`, contribution = 0.00). Currency conflicts suppress amount match; bank account conflicts suppress identifier match; causality conflicts suppress date proximity.
+  5. **Anti-Double Counting**:
+     Invoice number matches appearing in both payment reference and narration are credited at most once (+35.00). Customer name token and alias matches are credited at most once (+20.00).
+  6. **Zero Financial Mutation**:
+     Evaluates candidates in-memory. Zero database mutations (`len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`).
+  7. **Serialized Determinism & Ranking Total Order**:
+     Candidate scores are deterministically ranked by `(-total_score, invoice_number, str(invoice_id))`. Scoring timestamp (`scored_at`) is excluded from serialized deterministic comparison payloads. Bit-for-bit invariance verified over 100 random permutations.
+  8. **Multi-Tenant Security (Fail-Closed IDOR)**:
+     Endpoints `POST /api/v1/reconciliation/matching-scoring/{payment_id}` and `POST /api/v1/reconciliation/matching-scoring/batch` enforce company context scoping via `current_user.company_id`. Cross-tenant payments or customer overrides return HTTP 404. Sensitive bank coordinates are masked in contribution DTOs.
+- **Consequences**: Certified deterministic matching & scoring engine with 14 automated tests (8 unit, 6 integration/security). Full platform regression suite passed (533 tests, 0 failures, 85.95s runtime). Phase 14.11 is FROZEN. Downstream Phase 14.12 (Confidence Calibration) will build upon this foundation.
+
 
