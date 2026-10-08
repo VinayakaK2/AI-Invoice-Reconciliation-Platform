@@ -320,44 +320,98 @@ class MatchingScoringEngine:
         # --------------------------------------------------------------------------
         # 2. INVOICE_NUMBER_MATCH (+35 points)
         # Candidate invoice number explicitly referenced in narration or payment reference
-        # Anti-double counting: Narration invoice match and Payment reference match are combined
+        # Anti-double counting: Narration invoice match and Payment reference match are combined (awarded once)
+        # Source truth: If matched via payment reference, source must reflect payment.payment_reference
         # --------------------------------------------------------------------------
         invoice_ref_match = False
         invoice_ref_conflict = False
         matching_inv_item: Optional[CanonicalEvidenceObject] = None
+        cand_num_upper = bundle.invoice_number.upper().strip()
 
+        # Step 2a: Check candidate bundle items for explicit invoice match or conflict
         for item in bundle_items:
-            if item.evidence_type == NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION:
+            if item.evidence_type in (
+                NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION,
+                NormalizedEvidenceType.PAYMENT_REFERENCE,
+            ):
                 if item.classification == EvidenceClassification.CONFLICTING or item.result == NormalizedEvidenceResult.CONFLICT:
                     invoice_ref_conflict = True
-                elif item.classification == EvidenceClassification.DIRECT and item.result == NormalizedEvidenceResult.MATCH:
-                    invoice_ref_match = True
-                    matching_inv_item = item
+                elif (
+                    item.classification == EvidenceClassification.DIRECT
+                    or item.result in (NormalizedEvidenceResult.MATCH, NormalizedEvidenceResult.PRESENT)
+                ):
+                    # Verify matched_value matches candidate invoice number
+                    if item.matched_value and item.matched_value.upper().strip() == cand_num_upper:
+                        invoice_ref_match = True
+                        if matching_inv_item is None:
+                            matching_inv_item = item
 
-        # Also check payment-level extracted references if not directly on bundle
-        if not invoice_ref_match and not invoice_ref_conflict:
-            cand_num_upper = bundle.invoice_number.upper().strip()
-            if cand_num_upper in payment_evidence.extracted_invoice_references:
-                invoice_ref_match = True
-                # Find matching narration item in payment evidence
-                for item in payment_items:
-                    if item.evidence_type == NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION and item.result == NormalizedEvidenceResult.MATCH:
-                        matching_inv_item = item
-                        break
+        # Step 2b: Check payment-level extracted references if candidate matches
+        if not invoice_ref_conflict and cand_num_upper in payment_evidence.extracted_invoice_references:
+            invoice_ref_match = True
+            # Find evidence item in payment items to preserve truthful provenance
+            # Check payment_reference first if it matches
+            pay_ref_item = None
+            narration_inv_item = None
+            for item in payment_items:
+                if (
+                    item.evidence_type == NormalizedEvidenceType.PAYMENT_REFERENCE
+                    and item.matched_value
+                    and item.matched_value.upper().strip() == cand_num_upper
+                ):
+                    pay_ref_item = item
+                elif (
+                    item.evidence_type == NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION
+                    and item.result == NormalizedEvidenceResult.MATCH
+                ):
+                    narration_inv_item = item
 
-        if invoice_ref_match and not invoice_ref_conflict and matching_inv_item:
+            # Prioritize payment_reference if present in payment_reference
+            if pay_ref_item is not None:
+                matching_inv_item = pay_ref_item
+            elif narration_inv_item is not None and matching_inv_item is None:
+                matching_inv_item = narration_inv_item
+
+        # Step 2c: If payment referenced DIFFERENT invoice numbers and not this candidate, conflict suppression
+        if not invoice_ref_match and payment_evidence.extracted_invoice_references:
+            # Different invoice number was referenced in payment
+            invoice_ref_conflict = True
+
+        if invoice_ref_match and not invoice_ref_conflict:
+            # If matching_inv_item is still None, create a canonical fallback referencing payment_reference or narration
+            evidence_type = (
+                matching_inv_item.evidence_type
+                if matching_inv_item
+                else NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION
+            )
+            source = (
+                matching_inv_item.source
+                if matching_inv_item
+                else NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE
+            )
+            result = (
+                matching_inv_item.result
+                if matching_inv_item
+                else NormalizedEvidenceResult.MATCH
+            )
+            target_entity = (
+                matching_inv_item.target_entity
+                if matching_inv_item
+                else NormalizedTargetEntity.INVOICE
+            )
+
             contributions.append(
                 ScoreContribution(
                     signal_type=ScoringSignalType.INVOICE_NUMBER_MATCH,
                     weight=self.config.invoice_number_match_weight,
                     applied=True,
-                    evidence_type=matching_inv_item.evidence_type,
-                    source=matching_inv_item.source,
-                    result=matching_inv_item.result,
+                    evidence_type=evidence_type,
+                    source=source,
+                    result=result,
                     reason=f"Candidate invoice number '{bundle.invoice_number}' explicitly referenced in payment",
-                    target_entity=matching_inv_item.target_entity,
-                    matched_value=matching_inv_item.matched_value or bundle.invoice_number,
-                    expected_value=matching_inv_item.expected_value or bundle.invoice_number,
+                    target_entity=target_entity,
+                    matched_value=bundle.invoice_number,
+                    expected_value=bundle.invoice_number,
                 )
             )
 

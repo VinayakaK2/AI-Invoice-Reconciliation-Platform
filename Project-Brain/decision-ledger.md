@@ -292,15 +292,15 @@ This ledger documents the frozen architectural decisions made for the platform.
 
 ## ADR-019: Deterministic Matching & Scoring Engine & Rule 2.4 Evidence Aggregation
 - **Date**: 2026-10-08
-- **Status**: Accepted / Frozen
+- **Status**: Implemented / Remediated (Verification Pending)
 - **Context**: The reconciliation pipeline requires an objective, reproducible mathematical scoring layer to aggregate canonical normalized evidence (Phase 14.10) for candidate invoices into a bounded score between 0.00 and 100.00. The engine must adhere to Rule 2.4 weights, clamp total scores safely, suppress points when conflicting evidence exists, prevent double-counting across overlapping sources, award zero points for missing signals, maintain zero financial mutation, ensure fail-closed multi-tenancy, and strictly refrain from making financial disposition decisions (Phase 14.13) or probabilistic claims (Phase 14.12).
 - **Decision**:
   1. **Strict Separation of Concerns**:
      $$\text{Evidence Collection} \neq \text{Evidence Normalization} \neq \text{Matching \& Scoring} \neq \text{Confidence Calibration} \neq \text{Decision Engine} \neq \text{Financial Mutation}$$
      A score is evidence aggregation. A score is NOT a financial decision. The engine outputs candidate match scores only, never emitting `AUTO_ELIGIBLE`, `MATCH_SUGGESTED`, or financial allocations.
   2. **Rule 2.4 Baseline Scoring Weights**:
-     - `IDENTIFIER_MATCH`: +40.00 (bank account or UTR match)
-     - `INVOICE_NUMBER_MATCH`: +35.00 (invoice reference match)
+     - `IDENTIFIER_MATCH`: +40.00 (direct bank account or UPI VPA match; UTR is transaction metadata, not identifier match)
+     - `INVOICE_NUMBER_MATCH`: +35.00 (invoice reference match via payment reference or narration)
      - `AMOUNT_EXACT_MATCH`: +30.00 (exact balance match)
      - `CUSTOMER_NAME_MATCH`: +20.00 (customer name / alias match)
      - `DATE_PROXIMITY_MATCH`: +10.00 (causal date within 30 days)
@@ -309,15 +309,16 @@ This ledger documents the frozen architectural decisions made for the platform.
   3. **Provisional Empirical Validation Status**:
      Rule 2.4 weights are provisional heuristics and have not yet undergone large-scale empirical machine learning or offline statistical calibration. The engine explicitly flags `is_empirically_validated = False` across all domain objects and API responses.
   4. **Conflict Suppression & Zero Missing Credit**:
-     Any evidence classified as `MISSING` awards 0.00 points. Any active `CONFLICTING` evidence or conflicting canonical result suppresses the corresponding positive score contribution (`applied = False`, contribution = 0.00). Currency conflicts suppress amount match; bank account conflicts suppress identifier match; causality conflicts suppress date proximity.
-  5. **Anti-Double Counting**:
-     Invoice number matches appearing in both payment reference and narration are credited at most once (+35.00). Customer name token and alias matches are credited at most once (+20.00).
+     Any evidence classified as `MISSING` awards 0.00 points. Any active `CONFLICTING` evidence or conflicting canonical result suppresses the corresponding positive score contribution (`applied = False`, contribution = 0.00). Currency conflicts suppress amount match; bank account conflicts suppress identifier match; causality conflicts suppress date proximity; conflicting invoice references suppress invoice number match.
+  5. **Anti-Double Counting & Source Provenance Fidelity**:
+     Invoice number matches appearing in both payment reference and narration are credited at most once (+35.00). Actual source provenance is strictly preserved (`payment.payment_reference` vs `payment.narration`), never misrepresenting payment-reference matches as narration. Customer name token and alias matches are credited at most once (+20.00).
   6. **Zero Financial Mutation**:
      Evaluates candidates in-memory. Zero database mutations (`len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`).
   7. **Serialized Determinism & Ranking Total Order**:
      Candidate scores are deterministically ranked by `(-total_score, invoice_number, str(invoice_id))`. Scoring timestamp (`scored_at`) is excluded from serialized deterministic comparison payloads. Bit-for-bit invariance verified over 100 random permutations.
   8. **Multi-Tenant Security (Fail-Closed IDOR)**:
      Endpoints `POST /api/v1/reconciliation/matching-scoring/{payment_id}` and `POST /api/v1/reconciliation/matching-scoring/batch` enforce company context scoping via `current_user.company_id`. Cross-tenant payments or customer overrides return HTTP 404. Sensitive bank coordinates are masked in contribution DTOs.
-- **Consequences**: Certified deterministic matching & scoring engine with 14 automated tests (8 unit, 6 integration/security). Full platform regression suite passed (533 tests, 0 failures, 85.95s runtime). Phase 14.11 is FROZEN. Downstream Phase 14.12 (Confidence Calibration) will build upon this foundation.
+- **Consequences**: Certified deterministic matching & scoring engine with 20 automated tests (14 unit, 6 integration/security). Full platform regression suite passed (539 tests, 0 failures, 175.38s runtime). Phase 14.11 is remediated on feature branch and ready for independent verification. Downstream Phase 14.12 (Confidence Calibration) will build upon this foundation.
+
 
 
