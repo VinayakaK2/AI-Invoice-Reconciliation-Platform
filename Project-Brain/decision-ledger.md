@@ -318,7 +318,7 @@ This ledger documents the frozen architectural decisions made for the platform.
      Candidate scores are deterministically ranked by `(-total_score, invoice_number, str(invoice_id))`. Scoring timestamp (`scored_at`) is excluded from serialized deterministic comparison payloads. Bit-for-bit invariance verified over 100 random permutations.
   8. **Multi-Tenant Security (Fail-Closed IDOR)**:
      Endpoints `POST /api/v1/reconciliation/matching-scoring/{payment_id}` and `POST /api/v1/reconciliation/matching-scoring/batch` enforce company context scoping via `current_user.company_id`. Cross-tenant payments or customer overrides return HTTP 404. Sensitive bank coordinates are masked in contribution DTOs.
-- **Consequences**: Certified deterministic matching & scoring engine with 20 automated tests (14 unit, 6 integration/security). Full platform regression suite passed (539 tests, 0 failures, 175.38s runtime). Phase 14.11 is remediated on feature branch and ready for independent verification. Downstream Phase 14.12 (Confidence Calibration) will build upon this foundation.
+- **Consequences**: Certified deterministic matching & scoring engine with 21 automated tests (15 unit, 6 integration/security). Full platform regression suite passed (540 tests, 0 failures, 185.23s runtime). Phase 14.11 is remediated on feature branch and ready for independent verification. Downstream Phase 14.12 (Confidence Calibration) will build upon this foundation.
 
 
 

@@ -11,8 +11,8 @@
 | **Downstream Consumers** | Phase 14.12 Confidence Calibration, Phase 14.13 Decision Engine |
 | **Observed Financial Mutation** | **NONE** (Strictly Read-Only Evaluation, 0 DB Writes, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless in-memory domain evaluation) |
-| **Phase 14.11 Tests** | **20 Automated Tests** (14 pure domain rule & determinism tests, 6 integration/security tests, 100% Pass Rate) |
-| **Platform Total Suite** | **539 Total Tests Passed**, 0 Failures (Runtime: 175.38s) |
+| **Phase 14.11 Tests** | **21 Automated Tests** (15 pure domain rule & determinism tests, 6 integration/security tests, 100% Pass Rate) |
+| **Platform Total Suite** | **540 Total Tests Passed**, 0 Failures (Runtime: 185.23s) |
 | **Phase Status** | **IMPLEMENTATION REMEDIATED — READY FOR INDEPENDENT VERIFICATION** |
 
 ---
@@ -129,7 +129,7 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
      - `POST /api/v1/reconciliation/matching-scoring/batch`
      - `POST /api/v1/reconciliation/matching-scoring/{payment_id}`
 6. `backend/tests/unit/test_matching_scoring_rules.py` (EXTENDED)
-   - 14 comprehensive unit tests covering single signal allocations, mathematical clamping, anti-double counting, missing evidence handling, conflict suppression, 100-permutation determinism, tie handling, weight configuration, payment-reference invoice provenance, narration invoice provenance, reference + narration single-award anti-double counting, unrelated/conflicting reference handling, UTR non-identifier scoring exclusion, and UPI VPA identifier scoring.
+   - 15 comprehensive unit tests covering single signal allocations, mathematical clamping, anti-double counting, missing evidence handling, conflict suppression, 100-permutation determinism, tie handling, weight configuration, payment-reference invoice provenance, narration invoice provenance, reference + narration single-award anti-double counting, unrelated/conflicting reference handling, UTR non-identifier scoring exclusion, UPI VPA identifier scoring, and fail-closed absence of contradictory provenance synthesis.
 7. `backend/tests/integration/test_matching_scoring_api.py` (MODIFIED)
    - 6 integration tests verifying REST e2e flow, zero financial mutation, cross-tenant IDOR protection, customer override IDOR protection, unauthenticated rejection, and batch processing.
 
@@ -139,18 +139,18 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
 
 ### 6.1 Targeted Test Execution
 ```text
-tests/unit/test_matching_scoring_rules.py ..............                 [100%]
-14 passed in 0.63s
+tests/unit/test_matching_scoring_rules.py ...............                [100%]
+15 passed in 0.69s
 
 tests/integration/test_matching_scoring_api.py ......                    [100%]
-6 passed in 5.45s
+6 passed in 5.46s
 ```
 
 ### 6.2 Full Platform Regression Suite
 ```text
-======================= 539 passed in 175.38s (0:02:55) =======================
+======================= 540 passed in 185.23s (0:03:05) =======================
 ```
-All 539 tests in the repository pass with zero errors, zero warnings, and zero regressions.
+All 540 tests in the repository pass with zero errors, zero warnings, and zero regressions.
 
 ---
 

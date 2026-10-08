@@ -377,39 +377,19 @@ class MatchingScoringEngine:
             # Different invoice number was referenced in payment
             invoice_ref_conflict = True
 
-        if invoice_ref_match and not invoice_ref_conflict:
-            # If matching_inv_item is still None, create a canonical fallback referencing payment_reference or narration
-            evidence_type = (
-                matching_inv_item.evidence_type
-                if matching_inv_item
-                else NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION
-            )
-            source = (
-                matching_inv_item.source
-                if matching_inv_item
-                else NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE
-            )
-            result = (
-                matching_inv_item.result
-                if matching_inv_item
-                else NormalizedEvidenceResult.MATCH
-            )
-            target_entity = (
-                matching_inv_item.target_entity
-                if matching_inv_item
-                else NormalizedTargetEntity.INVOICE
-            )
-
+        # Fail closed: Only award score contribution when an authentic matching evidence item is present.
+        # Never fabricate, guess, or synthesize contradictory evidence_type / source combinations.
+        if invoice_ref_match and not invoice_ref_conflict and matching_inv_item is not None:
             contributions.append(
                 ScoreContribution(
                     signal_type=ScoringSignalType.INVOICE_NUMBER_MATCH,
                     weight=self.config.invoice_number_match_weight,
                     applied=True,
-                    evidence_type=evidence_type,
-                    source=source,
-                    result=result,
+                    evidence_type=matching_inv_item.evidence_type,
+                    source=matching_inv_item.source,
+                    result=matching_inv_item.result,
                     reason=f"Candidate invoice number '{bundle.invoice_number}' explicitly referenced in payment",
-                    target_entity=target_entity,
+                    target_entity=matching_inv_item.target_entity,
                     matched_value=bundle.invoice_number,
                     expected_value=bundle.invoice_number,
                 )

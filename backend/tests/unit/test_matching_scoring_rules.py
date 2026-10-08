@@ -917,3 +917,34 @@ class TestMatchingScoringEngine:
         assert score_vpa.contributions[0].signal_type == ScoringSignalType.IDENTIFIER_MATCH
         assert score_vpa.contributions[0].weight == Decimal("40.00")
 
+    def test_invoice_number_match_fails_closed_without_authentic_evidence_item(self) -> None:
+        """Engine fails closed: if candidate number is in extracted refs but no authentic item exists, awards 0."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        # extracted_invoice_references has INV-001, but items has NO matching item
+        pay_ctx = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[],
+            extracted_invoice_references=["INV-001"],
+            has_conflicting_identifiers=False,
+        )
+        empty_bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-001",
+            items=[],
+            has_conflicting_evidence=False,
+            direct_evidence_count=0,
+            supporting_evidence_count=0,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_res = engine.score_candidate(bundle=empty_bundle, payment_evidence=pay_ctx)
+        # Fails closed: 0 points, never fabricating contradictory provenance
+        assert score_res.total_score == Decimal("0.00")
+        assert not any(c.signal_type == ScoringSignalType.INVOICE_NUMBER_MATCH for c in score_res.contributions)
+
