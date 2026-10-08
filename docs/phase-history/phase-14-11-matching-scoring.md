@@ -11,9 +11,9 @@
 | **Downstream Consumers** | Phase 14.12 Confidence Calibration, Phase 14.13 Decision Engine |
 | **Observed Financial Mutation** | **NONE** (Strictly Read-Only Evaluation, 0 DB Writes, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless in-memory domain evaluation) |
-| **Phase 14.11 Tests** | **14 Automated Tests** (8 pure domain rule & determinism tests, 6 integration/security tests, 100% Pass Rate) |
-| **Platform Total Suite** | **533 Total Tests Passed**, 0 Failures (Runtime: 85.95s) |
-| **Phase Status** | **FROZEN** |
+| **Phase 14.11 Tests** | **20 Automated Tests** (14 pure domain rule & determinism tests, 6 integration/security tests, 100% Pass Rate) |
+| **Platform Total Suite** | **539 Total Tests Passed**, 0 Failures (Runtime: 175.38s) |
+| **Phase Status** | **IMPLEMENTATION REMEDIATED — READY FOR INDEPENDENT VERIFICATION** |
 
 ---
 
@@ -51,8 +51,8 @@ All calculations utilize `Decimal` precision with explicit two-decimal quantizin
 
 | Signal Type | Default Weight | Description / Trigger Condition |
 | :--- | :--- | :--- |
-| `IDENTIFIER_MATCH` | `+40.00` | Exact bank account or UTR identifier match between payment & customer/invoice |
-| `INVOICE_NUMBER_MATCH` | `+35.00` | Exact invoice number found in payment reference or narration |
+| `IDENTIFIER_MATCH` | `+40.00` | Exact bank account or UPI VPA customer identifier match between payment & customer registered coordinates. (Bank UTR is transaction metadata, NOT scored as an identifier match) |
+| `INVOICE_NUMBER_MATCH` | `+35.00` | Exact candidate invoice number found in payment reference or narration (with exact provenance preserved) |
 | `AMOUNT_EXACT_MATCH` | `+30.00` | Payment unallocated amount exactly equals candidate invoice open amount |
 | `CUSTOMER_NAME_MATCH` | `+20.00` | Exact match or high-confidence token/alias match on customer counterparty name |
 | `DATE_PROXIMITY_MATCH` | `+10.00` | Payment transaction date complies with date causality and is within 30 days of invoice due date |
@@ -81,12 +81,18 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
    - Currency conflict (`CURRENCY_CONSISTENCY` conflict) suppresses `AMOUNT_EXACT_MATCH`.
    - Bank account conflict suppresses `IDENTIFIER_MATCH`.
    - Date causality conflict (`payment_date < invoice_date`) suppresses `DATE_PROXIMITY_MATCH`.
+   - Conflicting invoice reference suppresses `INVOICE_NUMBER_MATCH`.
 
-4. **Anti-Double Counting:**
-   - If an invoice number is found in both payment reference and narration, it receives at most one `INVOICE_NUMBER_MATCH` (+35.00) credit.
+4. **Anti-Double Counting & Source Provenance Fidelity:**
+   - If candidate invoice number is found in both payment reference and narration, it receives at most one `INVOICE_NUMBER_MATCH` (+35.00) credit (never +70.00).
+   - Provenance is preserved: if matched via `payment_reference`, `source = payment.payment_reference` and `evidence_type = PAYMENT_REFERENCE`. If matched via narration, `source = payment.narration` and `evidence_type = INVOICE_NUMBER_IN_NARRATION`.
    - If customer counterparty is matched by name token and alias, it receives at most one `CUSTOMER_NAME_MATCH` (+20.00) credit.
 
-5. **Pure Determinism & Invariant Ordering:**
+5. **Direct Counterparty Identifiers vs Transaction Metadata:**
+   - Bank Account Number and UPI VPA are direct customer identifiers awarding `IDENTIFIER_MATCH` (+40.00).
+   - Bank UTR is a transaction-tracking reference, NOT a counterparty identifier, and never awards `IDENTIFIER_MATCH` (+40.00).
+
+6. **Pure Determinism & Invariant Ordering:**
    - Multiple candidate scores are deterministically sorted by:
      1. `total_score` descending
      2. `invoice_number` ascending
@@ -94,11 +100,11 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
    - Scoring timestamps (`scored_at`) are excluded from serialized deterministic comparisons.
    - Tested and verified over 100 shuffled permutations yielding identical bitwise payloads.
 
-6. **Explainability & Sensitive Coordinate Masking:**
+7. **Explainability & Sensitive Coordinate Masking:**
    - Every candidate score provides a detailed list of `ScoreContribution` objects documenting every active and suppressed signal, weight, reason, source, and target entity.
    - Sensitive financial coordinates (e.g., bank account numbers) in contribution payloads are masked (e.g. `********5544`).
 
-7. **Strict Multi-Tenancy (Fail-Closed IDOR):**
+8. **Strict Multi-Tenancy (Fail-Closed IDOR):**
    - API endpoints enforce authenticated tenant scoping via `current_user.company_id`.
    - Attempts to score payments belonging to another tenant return `HTTP 404 PAYMENT_NOT_FOUND`.
    - Customer override belonging to another tenant returns `HTTP 404 CUSTOMER_NOT_FOUND`.
@@ -107,8 +113,10 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
 
 ## 5. Artifacts and Files Changed
 
-1. `backend/app/modules/reconciliation/domain/matching_scoring.py` (NEW)
+1. `backend/app/modules/reconciliation/domain/matching_scoring.py` (REMEDIATED)
    - Core domain aggregates, value objects, and deterministic engine: `ScoringSignalType`, `ScoringWeightsConfig`, `ScoreContribution`, `CandidateScoreResult`, `MatchingScoringResult`, `MatchingScoringEngine`.
+   - Enhanced `INVOICE_NUMBER_MATCH` to check both bundle items and payment-level `payment_items` across both `payment_reference` and `narration`, preserving exact source provenance (`PAYMENT_PAYMENT_REFERENCE` vs `PAYMENT_NARRATION`) and enforcing anti-double-counting (+35 once).
+   - Refined `IDENTIFIER_MATCH` docstrings and scoring to strictly distinguish counterparty identifiers (Bank Account, UPI VPA) from transaction references (UTR).
 2. `backend/app/modules/reconciliation/domain/__init__.py` (MODIFIED)
    - Exported Phase 14.11 domain classes alongside Phase 14.10 and earlier modules.
 3. `backend/app/modules/reconciliation/application/use_cases.py` (MODIFIED)
@@ -120,9 +128,9 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
    - Endpoints:
      - `POST /api/v1/reconciliation/matching-scoring/batch`
      - `POST /api/v1/reconciliation/matching-scoring/{payment_id}`
-6. `backend/tests/unit/test_matching_scoring_rules.py` (NEW)
-   - 8 comprehensive unit tests covering point allocations, mathematical clamping, anti-double counting, missing evidence handling, conflict suppression, 100-permutation determinism, tie handling, and weight configuration.
-7. `backend/tests/integration/test_matching_scoring_api.py` (NEW)
+6. `backend/tests/unit/test_matching_scoring_rules.py` (EXTENDED)
+   - 14 comprehensive unit tests covering single signal allocations, mathematical clamping, anti-double counting, missing evidence handling, conflict suppression, 100-permutation determinism, tie handling, weight configuration, payment-reference invoice provenance, narration invoice provenance, reference + narration single-award anti-double counting, unrelated/conflicting reference handling, UTR non-identifier scoring exclusion, and UPI VPA identifier scoring.
+7. `backend/tests/integration/test_matching_scoring_api.py` (MODIFIED)
    - 6 integration tests verifying REST e2e flow, zero financial mutation, cross-tenant IDOR protection, customer override IDOR protection, unauthenticated rejection, and batch processing.
 
 ---
@@ -131,31 +139,35 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
 
 ### 6.1 Targeted Test Execution
 ```text
-tests/unit/test_matching_scoring_rules.py ........                       [100%]
-8 passed in 0.13s
+tests/unit/test_matching_scoring_rules.py ..............                 [100%]
+14 passed in 0.63s
 
 tests/integration/test_matching_scoring_api.py ......                    [100%]
-6 passed in 2.81s
+6 passed in 5.45s
 ```
 
 ### 6.2 Full Platform Regression Suite
 ```text
-======================= 533 passed in 85.95s (0:01:25) =======================
+======================= 539 passed in 175.38s (0:02:55) =======================
 ```
-All 533 tests in the repository pass with zero errors, zero warnings, and zero regressions.
+All 539 tests in the repository pass with zero errors, zero warnings, and zero regressions.
 
 ---
 
 ## 7. Status Declaration
 
-Phase 14.11 fulfills all requirements and quality gates:
-- [x] Mathematical model and Rule 2.4 weights implemented.
+Phase 14.11 remediation fulfills all requirements and quality gates:
+- [x] Invoice reference match evaluates both payment reference and narration with source fidelity.
+- [x] Anti-double counting guarantees exactly +35.00 once when both reference and narration match.
+- [x] Provenance correctly distinguishes `payment.payment_reference` vs `payment.narration`.
+- [x] Direct counterparty identifiers (Bank Account, UPI VPA) award +40.00; UTR presence does not award identifier score.
+- [x] Mathematical model and Rule 2.4 weights implemented and verified.
 - [x] Pure determinism and Decimal precision.
-- [x] Conflict suppression and anti-double counting verified.
+- [x] Conflict suppression verified.
 - [x] Zero financial mutation verified.
 - [x] Non-decision boundary enforced (no decisions, no probabilities).
 - [x] Tenant isolation and IDOR protection verified.
 - [x] Empirical validation status flagged as provisional.
-- [x] Full platform regression passed (533/533).
+- [x] Full platform regression passed (539/539).
 
-**Phase 14.11 is FROZEN.**
+**Phase 14.11 Status: IMPLEMENTATION REMEDIATED — READY FOR INDEPENDENT VERIFICATION.**

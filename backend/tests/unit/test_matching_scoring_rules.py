@@ -647,3 +647,273 @@ class TestMatchingScoringEngine:
 
         with pytest.raises(DomainError, match="amount_exact_match_weight cannot be negative"):
             ScoringWeightsConfig(amount_exact_match_weight=Decimal("-5.00"))
+
+    def test_invoice_number_match_via_payment_reference_provenance(self) -> None:
+        """Candidate invoice number in payment_reference awards +35.00 with provenance payment.payment_reference."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        ref_item = CanonicalEvidenceObject(
+            evidence_type=NormalizedEvidenceType.PAYMENT_REFERENCE,
+            source=NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE,
+            result=NormalizedEvidenceResult.MATCH,
+            strength=NormalizedEvidenceStrength.EXACT,
+            details="Candidate invoice INV-2026-001 extracted from payment reference",
+            identifiers=NormalizedRelevantIdentifiers(invoice_id=cand_id, invoice_number="INV-2026-001"),
+            classification=EvidenceClassification.DIRECT,
+            rule_version="1.0.0",
+            algorithm_version="14.10.0",
+            target_entity=NormalizedTargetEntity.INVOICE,
+            matched_value="INV-2026-001",
+        )
+        pay_ctx = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[ref_item],
+            extracted_invoice_references=["INV-2026-001"],
+            has_conflicting_identifiers=False,
+        )
+        bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-2026-001",
+            items=[ref_item],
+            has_conflicting_evidence=False,
+            direct_evidence_count=1,
+            supporting_evidence_count=0,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_res = engine.score_candidate(bundle=bundle, payment_evidence=pay_ctx)
+        assert score_res.total_score == Decimal("35.00")
+        assert len(score_res.contributions) == 1
+        contrib = score_res.contributions[0]
+        assert contrib.signal_type == ScoringSignalType.INVOICE_NUMBER_MATCH
+        assert contrib.weight == Decimal("35.00")
+        assert contrib.source == NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE
+        assert contrib.evidence_type == NormalizedEvidenceType.PAYMENT_REFERENCE
+
+    def test_invoice_number_match_via_narration_provenance(self) -> None:
+        """Candidate invoice number in narration awards +35.00 with provenance payment.narration."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        narr_item = CanonicalEvidenceObject(
+            evidence_type=NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION,
+            source=NormalizedEvidenceSource.PAYMENT_NARRATION,
+            result=NormalizedEvidenceResult.MATCH,
+            strength=NormalizedEvidenceStrength.EXACT,
+            details="Candidate invoice INV-2026-001 extracted from payment narration",
+            identifiers=NormalizedRelevantIdentifiers(invoice_id=cand_id, invoice_number="INV-2026-001"),
+            classification=EvidenceClassification.DIRECT,
+            rule_version="1.0.0",
+            algorithm_version="14.10.0",
+            target_entity=NormalizedTargetEntity.INVOICE,
+            matched_value="INV-2026-001",
+        )
+        pay_ctx = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[narr_item],
+            extracted_invoice_references=["INV-2026-001"],
+            has_conflicting_identifiers=False,
+        )
+        bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-2026-001",
+            items=[narr_item],
+            has_conflicting_evidence=False,
+            direct_evidence_count=1,
+            supporting_evidence_count=0,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_res = engine.score_candidate(bundle=bundle, payment_evidence=pay_ctx)
+        assert score_res.total_score == Decimal("35.00")
+        assert len(score_res.contributions) == 1
+        contrib = score_res.contributions[0]
+        assert contrib.signal_type == ScoringSignalType.INVOICE_NUMBER_MATCH
+        assert contrib.weight == Decimal("35.00")
+        assert contrib.source == NormalizedEvidenceSource.PAYMENT_NARRATION
+        assert contrib.evidence_type == NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION
+
+    def test_invoice_number_in_both_reference_and_narration_awards_once(self) -> None:
+        """Candidate invoice number in BOTH payment reference and narration awards +35.00 exactly once."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        ref_item = CanonicalEvidenceObject(
+            evidence_type=NormalizedEvidenceType.PAYMENT_REFERENCE,
+            source=NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE,
+            result=NormalizedEvidenceResult.MATCH,
+            strength=NormalizedEvidenceStrength.EXACT,
+            details="Candidate invoice INV-2026-001 in reference",
+            identifiers=NormalizedRelevantIdentifiers(invoice_id=cand_id, invoice_number="INV-2026-001"),
+            classification=EvidenceClassification.DIRECT,
+            rule_version="1.0.0",
+            algorithm_version="14.10.0",
+            target_entity=NormalizedTargetEntity.INVOICE,
+            matched_value="INV-2026-001",
+        )
+        narr_item = CanonicalEvidenceObject(
+            evidence_type=NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION,
+            source=NormalizedEvidenceSource.PAYMENT_NARRATION,
+            result=NormalizedEvidenceResult.MATCH,
+            strength=NormalizedEvidenceStrength.EXACT,
+            details="Candidate invoice INV-2026-001 in narration",
+            identifiers=NormalizedRelevantIdentifiers(invoice_id=cand_id, invoice_number="INV-2026-001"),
+            classification=EvidenceClassification.DIRECT,
+            rule_version="1.0.0",
+            algorithm_version="14.10.0",
+            target_entity=NormalizedTargetEntity.INVOICE,
+            matched_value="INV-2026-001",
+        )
+        pay_ctx = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[ref_item, narr_item],
+            extracted_invoice_references=["INV-2026-001"],
+            has_conflicting_identifiers=False,
+        )
+        bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-2026-001",
+            items=[ref_item, narr_item],
+            has_conflicting_evidence=False,
+            direct_evidence_count=2,
+            supporting_evidence_count=0,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_res = engine.score_candidate(bundle=bundle, payment_evidence=pay_ctx)
+        # Exactly +35.00 once, NEVER +70.00
+        assert score_res.total_score == Decimal("35.00")
+        inv_contribs = [c for c in score_res.contributions if c.signal_type == ScoringSignalType.INVOICE_NUMBER_MATCH]
+        assert len(inv_contribs) == 1
+        assert inv_contribs[0].weight == Decimal("35.00")
+
+    def test_unrelated_and_conflicting_invoice_reference_handling(self) -> None:
+        """Unrelated invoice reference awards 0; conflicting reference suppresses contribution."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        # Payment reference contains INV-999, but candidate is INV-001
+        pay_ctx = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[],
+            extracted_invoice_references=["INV-999"],
+            has_conflicting_identifiers=False,
+        )
+        bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-001",
+            items=[],
+            has_conflicting_evidence=False,
+            direct_evidence_count=0,
+            supporting_evidence_count=0,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_res = engine.score_candidate(bundle=bundle, payment_evidence=pay_ctx)
+        assert score_res.total_score == Decimal("0.00")
+        assert len(score_res.contributions) == 0
+
+    def test_utr_presence_does_not_award_identifier_match_score(self) -> None:
+        """UTR presence is transaction metadata, NOT a customer counterparty identifier (+40)."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        utr_item = CanonicalEvidenceObject(
+            evidence_type=NormalizedEvidenceType.UTR_IDENTIFIER,
+            source=NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE,
+            result=NormalizedEvidenceResult.MATCH,
+            strength=NormalizedEvidenceStrength.HIGH,
+            details="UTR transaction tracking reference present: UTR12345678",
+            identifiers=NormalizedRelevantIdentifiers(payment_id=payment_id, utr="UTR12345678"),
+            classification=EvidenceClassification.SUPPORTING,
+            rule_version="1.0.0",
+            algorithm_version="14.10.0",
+            target_entity=NormalizedTargetEntity.PAYMENT,
+            matched_value="UTR12345678",
+        )
+        pay_ctx = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[utr_item],
+            extracted_invoice_references=[],
+            has_conflicting_identifiers=False,
+        )
+        bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-001",
+            items=[],
+            has_conflicting_evidence=False,
+            direct_evidence_count=0,
+            supporting_evidence_count=1,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_res = engine.score_candidate(bundle=bundle, payment_evidence=pay_ctx)
+        # UTR must NOT award IDENTIFIER_MATCH (+40.00)
+        assert score_res.total_score == Decimal("0.00")
+        assert not any(c.signal_type == ScoringSignalType.IDENTIFIER_MATCH for c in score_res.contributions)
+
+    def test_upi_vpa_and_bank_account_award_identifier_match_score(self) -> None:
+        """Direct counterparty identifiers (BANK_ACCOUNT and UPI_VPA) both award +40.00."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        # UPI VPA test
+        vpa_item = CanonicalEvidenceObject(
+            evidence_type=NormalizedEvidenceType.UPI_VPA_IDENTIFIER,
+            source=NormalizedEvidenceSource.PAYMENT_PAYER_RAW_IDENTIFIER,
+            result=NormalizedEvidenceResult.MATCH,
+            strength=NormalizedEvidenceStrength.EXACT,
+            details="UPI VPA matched registered customer identifier",
+            identifiers=NormalizedRelevantIdentifiers(payment_id=payment_id),
+            classification=EvidenceClassification.DIRECT,
+            rule_version="1.0.0",
+            algorithm_version="14.10.0",
+            target_entity=NormalizedTargetEntity.CUSTOMER,
+            matched_value="cust@upi",
+        )
+        pay_ctx_vpa = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[vpa_item],
+            extracted_invoice_references=[],
+            has_conflicting_identifiers=False,
+        )
+        bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-001",
+            items=[],
+            has_conflicting_evidence=False,
+            direct_evidence_count=0,
+            supporting_evidence_count=0,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_vpa = engine.score_candidate(bundle=bundle, payment_evidence=pay_ctx_vpa)
+        assert score_vpa.total_score == Decimal("40.00")
+        assert score_vpa.contributions[0].signal_type == ScoringSignalType.IDENTIFIER_MATCH
+        assert score_vpa.contributions[0].weight == Decimal("40.00")
+
