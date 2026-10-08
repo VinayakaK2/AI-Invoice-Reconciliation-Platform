@@ -11,8 +11,8 @@
 | **Downstream Consumers** | Phase 14.11 Matching & Scoring, Phase 14.12 Confidence Calibration, Phase 14.13 Decision Engine |
 | **Observed Financial Mutation** | **NONE** (Strictly Read-Only Evaluation, 0 DB Writes, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless in-memory domain evaluation) |
-| **Phase 14.10 Tests** | **14 Automated Tests** (8 unit tests, 6 integration/security tests, 100% Pass Rate) |
-| **Platform Total Suite** | **515 Total Tests Passed**, 0 Failures (Runtime: 176.32s) |
+| **Phase 14.10 Tests** | **18 Automated Tests** (12 unit tests, 6 integration/security tests, 100% Pass Rate) |
+| **Platform Total Suite** | **519 Total Tests Passed**, 0 Failures |
 | **Phase Status** | **IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION** |
 
 ---
@@ -47,10 +47,13 @@ Convert Phase 14.9 evidence into canonical `CanonicalEvidenceObject` instances c
    - It does **NOT** calculate composite scores or weights (`match_score` is strictly deferred to Phase 14.11).
    - It does **NOT** compute statistical or heuristic probabilities (`confidence_score` is strictly deferred to Phase 14.12).
    - It does **NOT** choose a winning candidate or resolve conflicts.
-3. **Semantic Preservation:**
+3. **Semantic Preservation & Fail-Closed Defense:**
    - `Raw meaning == Normalized meaning`.
    - All `CONFLICTING` signals are preserved as `CONFLICT` with `NONE` strength, without suppression or premature resolution.
    - All `MISSING` signals are preserved as `ABSENT` with `NONE` strength, without fabrication.
+   - **Fail-Closed on Invalid Inputs (Remediated):**
+     - Invalid or unmapped `target_entity` strings raise `DomainError`; never default silently to `PAYMENT`.
+     - Invalid or unmapped `observed_result` strings raise `DomainError`; never infer or guess canonical results from `classification`.
 4. **Qualitative Strength (Non-Numeric):**
    - Strength is strictly qualitative (`EXACT`, `HIGH`, `MEDIUM`, `LOW`, `NONE`).
    - Zero numeric weights or points assigned in Phase 14.10.
@@ -90,6 +93,7 @@ Domain Engine (`EvidenceNormalizationEngine`)
     │  - Maps raw `StructuredEvidenceItem` to `CanonicalEvidenceObject`
     │  - Canonicalizes sources, types, results, and qualitative strengths
     │  - Preserves DIRECT, SUPPORTING, MISSING, and CONFLICTING classifications
+    │  - Fails closed on invalid target_entity and observed_result
     │  - Deduplicates exact identical evidence signatures without data loss
     │  - Enforces deterministic bundle order: (invoice_number, invoice_id)
     │  - Enforces deterministic item order: (classification, evidence_type, source, target_entity, details)
@@ -105,7 +109,7 @@ Presentation Layer (`EvidenceNormalizationResponse`)
 
 ## 5. Verification & Test Evidence
 
-### Unit Suite (`tests/unit/test_evidence_normalization_rules.py`) — 8 Tests Passed
+### Unit Suite (`tests/unit/test_evidence_normalization_rules.py`) — 12 Tests Passed
 - `test_direct_evidence_normalization`: Proves DIRECT items normalize to MATCH with EXACT strength for bank account and amount equality.
 - `test_supporting_evidence_normalization`: Proves SUPPORTING items normalize to SUPPORTED/PRESENT with MEDIUM/LOW strength for UTR, customer tokens, partial amounts, and causality.
 - `test_missing_evidence_normalization`: Proves MISSING items normalize to ABSENT with NONE strength without fabricating data.
@@ -114,6 +118,10 @@ Presentation Layer (`EvidenceNormalizationResponse`)
 - `test_100_run_permutation_determinism`: Proves complete serialized deterministic payload (`to_deterministic_payload`) is bit-for-bit identical across 100 random candidate permutations.
 - `test_unknown_source_fallback`: Proves unmapped source strings fall back safely to `UNKNOWN_SOURCE`.
 - `test_invalid_canonical_object_validation`: Proves `CanonicalEvidenceObject` validates non-empty details, rule_version, and algorithm_version.
+- `test_unknown_target_entity_fails_closed`: Proves unknown or invalid target entity raises `DomainError` and never defaults to `PAYMENT`.
+- `test_unknown_observed_result_fails_closed`: Proves unknown or invalid observed result raises `DomainError` and never infers or guesses.
+- `test_classification_cannot_bypass_invalid_observed_result`: Proves DIRECT/SUPPORTING classification cannot bypass an invalid observed result.
+- `test_item_normalization_fails_closed_on_invalid_raw_evidence`: Proves whole item normalization fails closed if raw evidence contains corrupted or invalid values.
 
 ### Integration Suite (`tests/integration/test_evidence_normalization_api.py`) — 6 Tests Passed
 - `test_evidence_normalization_api_e2e`: Proves end-to-end API response conforms to schema, returns canonical evidence, and masks sensitive banking coordinates.
@@ -123,13 +131,13 @@ Presentation Layer (`EvidenceNormalizationResponse`)
 - `test_evidence_normalization_unauthenticated_rejected`: Proves missing token fails with HTTP 401.
 - `test_evidence_normalization_use_case_adversarial_cross_tenant_candidate`: Proves adversarial caller injecting a cross-tenant candidate at use-case boundary is rejected with `ForbiddenError`.
 
-### Full Platform Regression Suite — 515 Tests Passed (100% Pass Rate)
-- 515 passed in 176.32s across all modules (Auth, Company, Customer, Invoice, Payment, Reconciliation 14.1 through 14.10). Zero failures. Zero regressions.
+### Full Platform Regression Suite — 519 Tests Passed (100% Pass Rate)
+- 519 passed across all modules (Auth, Company, Customer, Invoice, Payment, Reconciliation 14.1 through 14.10). Zero failures. Zero regressions.
 
 ---
 
 ## 6. Implementation Status
 
-Phase 14.10 satisfies all requirements of clean architecture, deterministic financial safety, zero mutation, multi-tenant isolation, serialized payload determinism, qualitative strength calibration, and canonical evidence modeling.
+Phase 14.10 satisfies all requirements of clean architecture, deterministic financial safety, zero mutation, multi-tenant isolation, serialized payload determinism, qualitative strength calibration, semantic preservation, and canonical evidence modeling.
 
 Status: **IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION**.

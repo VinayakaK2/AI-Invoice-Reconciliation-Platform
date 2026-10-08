@@ -450,3 +450,74 @@ class TestEvidenceNormalizationRules:
                 algorithm_version="14.10.0",
                 target_entity=NormalizedTargetEntity.PAYMENT,
             )
+
+    def test_unknown_target_entity_fails_closed(self) -> None:
+        """Invalid or unknown target_entity strings must raise DomainError (never default to PAYMENT)."""
+        normalizer = EvidenceNormalizationEngine()
+        invalid_entities = ["UNKNOWN", "BANK_ACCOUNT", "INVALID_ENTITY", "PAYMENT_ORDER", ""]
+
+        for invalid_entity in invalid_entities:
+            with pytest.raises(DomainError, match="Unsupported or invalid target entity for normalization"):
+                normalizer.normalize_target_entity(invalid_entity)
+
+        # Valid entities must succeed
+        assert normalizer.normalize_target_entity("PAYMENT") == NormalizedTargetEntity.PAYMENT
+        assert normalizer.normalize_target_entity("CUSTOMER") == NormalizedTargetEntity.CUSTOMER
+        assert normalizer.normalize_target_entity("INVOICE") == NormalizedTargetEntity.INVOICE
+        assert normalizer.normalize_target_entity("COMBINATION") == NormalizedTargetEntity.COMBINATION
+
+    def test_unknown_observed_result_fails_closed(self) -> None:
+        """Invalid or unknown observed_result strings must raise DomainError (never guess or infer)."""
+        normalizer = EvidenceNormalizationEngine()
+        invalid_results = ["UNKNOWN_RESULT", "PARTIAL_MATCH", "UNVERIFIED", "RANDOM_STRING", ""]
+
+        for invalid_res in invalid_results:
+            with pytest.raises(DomainError, match="Unsupported or invalid observed result for normalization"):
+                normalizer.normalize_result(invalid_res, EvidenceClassification.SUPPORTING)
+
+    def test_classification_cannot_bypass_invalid_observed_result(self) -> None:
+        """DIRECT or SUPPORTING classification must not convert invalid observed_result into MATCH/SUPPORTED."""
+        normalizer = EvidenceNormalizationEngine()
+
+        with pytest.raises(DomainError, match="Unsupported or invalid observed result for normalization"):
+            normalizer.normalize_result("INVALID_DIRECT_RESULT", EvidenceClassification.DIRECT)
+
+        with pytest.raises(DomainError, match="Unsupported or invalid observed result for normalization"):
+            normalizer.normalize_result("MALFORMED_SUPPORTING", EvidenceClassification.SUPPORTING)
+
+        with pytest.raises(DomainError, match="Unsupported or invalid observed result for normalization"):
+            normalizer.normalize_result("BOGUS_MISSING", EvidenceClassification.MISSING)
+
+        with pytest.raises(DomainError, match="Unsupported or invalid observed result for normalization"):
+            normalizer.normalize_result("BOGUS_CONFLICT", EvidenceClassification.CONFLICTING)
+
+    def test_item_normalization_fails_closed_on_invalid_raw_evidence(self) -> None:
+        """normalizer.normalize_item() fails closed when given an item with invalid target_entity or observed_result."""
+        normalizer = EvidenceNormalizationEngine()
+
+        # Item with invalid target_entity
+        bad_entity_item = StructuredEvidenceItem(
+            evidence_type=EvidenceType.PAYMENT_REFERENCE,
+            classification=EvidenceClassification.SUPPORTING,
+            source_field="payment.payment_reference",
+            observed_result="PRESENT",
+            description="Valid description",
+            target_entity="NON_EXISTENT_ENTITY",
+            matched_value="REF123",
+        )
+        with pytest.raises(DomainError, match="Unsupported or invalid target entity for normalization"):
+            normalizer.normalize_item(bad_entity_item)
+
+        # Item with invalid observed_result
+        bad_result_item = StructuredEvidenceItem(
+            evidence_type=EvidenceType.PAYMENT_REFERENCE,
+            classification=EvidenceClassification.DIRECT,
+            source_field="payment.payment_reference",
+            observed_result="INVENTED_RESULT",
+            description="Valid description",
+            target_entity="PAYMENT",
+            matched_value="REF123",
+        )
+        with pytest.raises(DomainError, match="Unsupported or invalid observed result for normalization"):
+            normalizer.normalize_item(bad_result_item)
+

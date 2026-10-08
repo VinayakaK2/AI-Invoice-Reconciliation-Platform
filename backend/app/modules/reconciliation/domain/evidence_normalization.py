@@ -392,39 +392,53 @@ class EvidenceNormalizationEngine:
                 return enum_val
         return NormalizedEvidenceSource.UNKNOWN_SOURCE
 
+    VALID_OBSERVED_RESULTS = {
+        "MATCHED": NormalizedEvidenceResult.MATCH,
+        "EXACT_MATCH": NormalizedEvidenceResult.MATCH,
+        "CONSISTENT": NormalizedEvidenceResult.MATCH,
+        "PRESENT": NormalizedEvidenceResult.PRESENT,
+        "EXTRACTED": NormalizedEvidenceResult.PRESENT,
+        "TOKEN_OVERLAP": NormalizedEvidenceResult.SUPPORTED,
+        "PARTIAL_AMOUNT": NormalizedEvidenceResult.SUPPORTED,
+        "OVERPAYMENT_AMOUNT": NormalizedEvidenceResult.SUPPORTED,
+        "CAUSAL": NormalizedEvidenceResult.SUPPORTED,
+        "PROXIMATE": NormalizedEvidenceResult.SUPPORTED,
+        "CONFLICT": NormalizedEvidenceResult.CONFLICT,
+        "NON_CAUSAL": NormalizedEvidenceResult.CONFLICT,
+        "ABSENT": NormalizedEvidenceResult.ABSENT,
+        "DISTANT": NormalizedEvidenceResult.ABSENT,
+        "UNREGISTERED": NormalizedEvidenceResult.ABSENT,
+        "NO_MATCH": NormalizedEvidenceResult.NO_MATCH,
+    }
+
     def normalize_result(
         self,
         observed_result: str,
         classification: EvidenceClassification,
     ) -> NormalizedEvidenceResult:
-        """Map raw observed result and classification to canonical NormalizedEvidenceResult."""
+        """Map raw observed result and classification to canonical NormalizedEvidenceResult.
+        
+        Fails closed on any unknown or unsupported observed_result string to preserve
+        semantic fidelity (Raw meaning == Normalized meaning). Never guesses or infers
+        a canonical result from classification alone.
+        """
         upper_res = observed_result.upper().strip() if observed_result else ""
+        if not upper_res or upper_res not in self.VALID_OBSERVED_RESULTS:
+            raise DomainError(f"Unsupported or invalid observed result for normalization: '{observed_result}'")
 
-        if classification == EvidenceClassification.CONFLICTING or upper_res in ("CONFLICT", "NON_CAUSAL"):
-            return NormalizedEvidenceResult.CONFLICT
+        mapped = self.VALID_OBSERVED_RESULTS[upper_res]
 
-        if classification == EvidenceClassification.MISSING or upper_res in ("ABSENT", "DISTANT", "UNREGISTERED"):
-            return NormalizedEvidenceResult.ABSENT
+        # Verify classification consistency: classification must not contradict the explicit observed result
+        if classification == EvidenceClassification.CONFLICTING and mapped != NormalizedEvidenceResult.CONFLICT:
+            raise DomainError(
+                f"Inconsistent classification CONFLICTING with observed result '{observed_result}'"
+            )
+        if classification == EvidenceClassification.MISSING and mapped != NormalizedEvidenceResult.ABSENT:
+            raise DomainError(
+                f"Inconsistent classification MISSING with observed result '{observed_result}'"
+            )
 
-        if upper_res in ("MATCHED", "EXACT_MATCH", "CONSISTENT"):
-            return NormalizedEvidenceResult.MATCH
-
-        if upper_res in ("PRESENT", "EXTRACTED"):
-            return NormalizedEvidenceResult.PRESENT
-
-        if upper_res in ("TOKEN_OVERLAP", "PARTIAL_AMOUNT", "OVERPAYMENT_AMOUNT", "CAUSAL", "PROXIMATE"):
-            return NormalizedEvidenceResult.SUPPORTED
-
-        if upper_res == "NO_MATCH":
-            return NormalizedEvidenceResult.NO_MATCH
-
-        # Fallback based on classification
-        if classification == EvidenceClassification.DIRECT:
-            return NormalizedEvidenceResult.MATCH
-        if classification == EvidenceClassification.SUPPORTING:
-            return NormalizedEvidenceResult.SUPPORTED
-
-        return NormalizedEvidenceResult.NO_MATCH
+        return mapped
 
     def determine_strength(
         self,
@@ -467,15 +481,21 @@ class EvidenceNormalizationEngine:
         return NormalizedEvidenceStrength.NONE
 
     def normalize_target_entity(self, raw_entity: str) -> NormalizedTargetEntity:
-        """Map raw target entity string to canonical NormalizedTargetEntity enum."""
+        """Map raw target entity string to canonical NormalizedTargetEntity enum.
+        
+        Fails closed on any unknown or unsupported target entity string to preserve
+        semantic fidelity (Raw meaning == Normalized meaning).
+        """
         upper = raw_entity.upper().strip() if raw_entity else ""
+        if upper == "PAYMENT":
+            return NormalizedTargetEntity.PAYMENT
         if upper == "CUSTOMER":
             return NormalizedTargetEntity.CUSTOMER
         if upper == "INVOICE":
             return NormalizedTargetEntity.INVOICE
         if upper == "COMBINATION":
             return NormalizedTargetEntity.COMBINATION
-        return NormalizedTargetEntity.PAYMENT
+        raise DomainError(f"Unsupported or invalid target entity for normalization: '{raw_entity}'")
 
     def build_identifiers(
         self,
