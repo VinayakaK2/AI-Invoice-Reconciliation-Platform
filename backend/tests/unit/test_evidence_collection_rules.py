@@ -369,3 +369,36 @@ def test_matching_tenant_candidate_accepted() -> None:
     assert len(result.candidate_bundles) == 1
     assert result.candidate_bundles[0].invoice_number == "INV-TENANT-A"
 
+
+
+def test_payment_reference_invoice_token_is_canonicalized() -> None:
+    engine = EvidenceCollectionEngine()
+    result = engine.evaluate(
+        payment=_make_payment(payment_reference="inv-2026-001", narration=""),
+        candidates=[],
+        customer=_make_customer(),
+    )
+    assert result.payment_evidence.extracted_invoice_references == ["INV-2026-001"]
+
+
+def test_generic_alphanumeric_narration_is_not_treated_as_utr() -> None:
+    engine = EvidenceCollectionEngine()
+    result = engine.evaluate(
+        payment=_make_payment(payment_reference="", narration="MISCELLANEOUS TRANSFER"),
+        candidates=[],
+        customer=_make_customer(),
+    )
+    utr_items = [i for i in result.payment_evidence.items if i.evidence_type == EvidenceType.UTR_IDENTIFIER]
+    assert utr_items[0].classification == EvidenceClassification.MISSING
+
+
+def test_registered_upi_vpa_is_classified_as_upi_identifier() -> None:
+    customer = _make_customer(identifiers=[("UPI_VPA", "vinayaka@upi")])
+    result = EvidenceCollectionEngine().evaluate(
+        payment=_make_payment(bank_account_number=None, payer_raw_identifier="vinayaka@upi"),
+        candidates=[],
+        customer=customer,
+    )
+    upi_items = [i for i in result.payment_evidence.items if i.evidence_type == EvidenceType.UPI_VPA_IDENTIFIER]
+    assert len(upi_items) == 1
+    assert upi_items[0].classification == EvidenceClassification.DIRECT

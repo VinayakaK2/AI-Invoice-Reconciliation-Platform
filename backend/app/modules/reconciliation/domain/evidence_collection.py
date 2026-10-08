@@ -212,7 +212,7 @@ class EvidenceCollectionEngine:
     - Preserves all conflicting and missing signals without loss.
     """
 
-    UTR_REGEX = re.compile(r"\b[A-Z0-9]{12,22}\b", re.IGNORECASE)
+    UTR_REGEX = re.compile(r"\bUTR(?:\s*(?:NO|NUMBER|REF(?:ERENCE)?))?\s*[:#-]\s*([A-Z0-9]{8,22})\b", re.IGNORECASE)
     INVOICE_PATTERN = re.compile(r"\b(?:INV|BILL|REC)[-_A-Z0-9]{3,30}\b", re.IGNORECASE)
 
     def __init__(self, normalizer: Optional[PayerStringNormalizer] = None) -> None:
@@ -242,9 +242,9 @@ class EvidenceCollectionEngine:
                     matched_value=ref_clean,
                 )
             )
-            # Check if reference format resembles an invoice number or UTR
+            # Canonicalize invoice-like references before downstream comparison.
             if self.INVOICE_PATTERN.match(ref_clean):
-                extracted_invoice_refs.append(ref_clean)
+                extracted_invoice_refs.append(ref_clean.upper().strip())
         else:
             items.append(
                 StructuredEvidenceItem(
@@ -329,73 +329,101 @@ class EvidenceCollectionEngine:
                 )
             )
 
-        # 3. Bank Account Identifier & Cross-Customer Conflict Check
+        # 3. Payment Coordinate Identifier & Cross-Customer Conflict Check
         has_conflicting_identifiers = False
-        payment_acc = payment.bank_account_number or payment.payer_raw_identifier
-        if payment_acc and payment_acc.strip():
-            clean_acc = payment_acc.strip()
-            # If customer is resolved, check whether bank account belongs to customer
+        bank_account = (payment.bank_account_number or "").strip()
+        payer_identifier = (payment.payer_raw_identifier or "").strip()
+
+        if bank_account:
+            clean_acc = bank_account
             if customer:
                 cust_accounts = [val for (itype, val) in customer.identifiers if itype in ("BANK_ACCOUNT", "VIRTUAL_ACCOUNT")]
                 if clean_acc in cust_accounts or any(clean_acc.endswith(ca) or ca.endswith(clean_acc) for ca in cust_accounts):
-                    items.append(
-                        StructuredEvidenceItem(
-                            evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
-                            classification=EvidenceClassification.DIRECT,
-                            source_field="payment.bank_account_number",
-                            observed_result="MATCHED",
-                            description=f"Payment account matches registered customer bank account: {clean_acc}",
-                            target_entity="CUSTOMER",
-                            matched_value=clean_acc,
-                        )
-                    )
+                    items.append(StructuredEvidenceItem(
+                        evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
+                        classification=EvidenceClassification.DIRECT,
+                        source_field="payment.bank_account_number",
+                        observed_result="MATCHED",
+                        description=f"Payment account matches registered customer bank account: {clean_acc}",
+                        target_entity="CUSTOMER",
+                        matched_value=clean_acc,
+                    ))
                 else:
-                    # Account provided, but not registered under resolved customer
-                    items.append(
-                        StructuredEvidenceItem(
-                            evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
-                            classification=EvidenceClassification.MISSING,
-                            source_field="payment.bank_account_number",
-                            observed_result="UNREGISTERED",
-                            description=f"Payment account {clean_acc} is not in resolved customer's registered identifiers",
-                            target_entity="CUSTOMER",
-                            matched_value=clean_acc,
-                        )
-                    )
-
-            # Check if account belongs to a DIFFERENT known customer (CONFLICT)
+                    items.append(StructuredEvidenceItem(
+                        evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
+                        classification=EvidenceClassification.MISSING,
+                        source_field="payment.bank_account_number",
+                        observed_result="UNREGISTERED",
+                        description=f"Payment account {clean_acc} is not in resolved customer's registered identifiers",
+                        target_entity="CUSTOMER",
+                        matched_value=clean_acc,
+                    ))
             if all_customers and customer:
                 for other_c in all_customers:
                     if other_c.customer_id != customer.customer_id and not other_c.is_archived:
                         other_accs = [val for (itype, val) in other_c.identifiers if itype in ("BANK_ACCOUNT", "VIRTUAL_ACCOUNT")]
                         if clean_acc in other_accs:
                             has_conflicting_identifiers = True
-                            items.append(
-                                StructuredEvidenceItem(
-                                    evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
-                                    classification=EvidenceClassification.CONFLICTING,
-                                    source_field="payment.bank_account_number",
-                                    observed_result="CONFLICT",
-                                    description=(
-                                        f"Payment account {clean_acc} belongs to Customer '{other_c.name}' "
-                                        f"({other_c.customer_id}), conflicting with candidate customer '{customer.name}'"
-                                    ),
-                                    target_entity="CUSTOMER",
-                                    matched_value=str(other_c.customer_id),
-                                    expected_value=str(customer.customer_id),
-                                )
-                            )
-        else:
-            items.append(
-                StructuredEvidenceItem(
-                    evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
+                            items.append(StructuredEvidenceItem(
+                                evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
+                                classification=EvidenceClassification.CONFLICTING,
+                                source_field="payment.bank_account_number",
+                                observed_result="CONFLICT",
+                                description=f"Payment account {clean_acc} belongs to Customer '{other_c.name}'",
+                                target_entity="CUSTOMER",
+                                matched_value=clean_acc,
+                            ))
+        elif payer_identifier and "@" in payer_identifier:
+            clean_vpa = payer_identifier
+            matched = False
+            if customer:
+                customer_vpas = [val for (itype, val) in customer.identifiers if itype == "UPI_VPA"]
+                if clean_vpa in customer_vpas:
+                    matched = True
+                    items.append(StructuredEvidenceItem(
+                        evidence_type=EvidenceType.UPI_VPA_IDENTIFIER,
+                        classification=EvidenceClassification.DIRECT,
+                        source_field="payment.payer_raw_identifier",
+                        observed_result="MATCHED",
+                        description=f"Payment UPI VPA matches registered customer identifier: {clean_vpa}",
+                        target_entity="CUSTOMER",
+                        matched_value=clean_vpa,
+                    ))
+            if all_customers and customer:
+                for other_c in all_customers:
+                    if other_c.customer_id != customer.customer_id and not other_c.is_archived:
+                        other_vpas = [val for (itype, val) in other_c.identifiers if itype == "UPI_VPA"]
+                        if clean_vpa in other_vpas:
+                            has_conflicting_identifiers = True
+                            matched = True
+                            items.append(StructuredEvidenceItem(
+                                evidence_type=EvidenceType.UPI_VPA_IDENTIFIER,
+                                classification=EvidenceClassification.CONFLICTING,
+                                source_field="payment.payer_raw_identifier",
+                                observed_result="CONFLICT",
+                                description=f"Payment UPI VPA {clean_vpa} belongs to a different registered customer",
+                                target_entity="CUSTOMER",
+                                matched_value=clean_vpa,
+                            ))
+            if not matched:
+                items.append(StructuredEvidenceItem(
+                    evidence_type=EvidenceType.UPI_VPA_IDENTIFIER,
                     classification=EvidenceClassification.MISSING,
-                    source_field="payment.bank_account_number",
-                    observed_result="ABSENT",
-                    description="Payment does not contain a payer bank account identifier",
+                    source_field="payment.payer_raw_identifier",
+                    observed_result="UNREGISTERED",
+                    description=f"Payment UPI VPA {clean_vpa} is not in registered customer identifiers",
                     target_entity="CUSTOMER",
-                )
-            )
+                    matched_value=clean_vpa,
+                ))
+        else:
+            items.append(StructuredEvidenceItem(
+                evidence_type=EvidenceType.BANK_ACCOUNT_IDENTIFIER,
+                classification=EvidenceClassification.MISSING,
+                source_field="payment.bank_account_number",
+                observed_result="ABSENT",
+                description="Payment does not contain a bank account or UPI payer identifier",
+                target_entity="CUSTOMER",
+            ))
 
         # 4. Customer Name / Alias Evidence
         if customer:

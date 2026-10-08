@@ -319,3 +319,34 @@ def test_evidence_collection_use_case_adversarial_cross_tenant_candidate(
     assert "belongs to company" in str(exc_info.value)
     assert "not authenticated company" in str(exc_info.value)
 
+
+
+def test_evidence_collection_masks_bank_account_in_description(
+    client: TestClient, registered_owner: dict
+) -> None:
+    headers = registered_owner["headers"]
+    cust_id = client.post(
+        "/api/v1/customers",
+        headers=headers,
+        json={"name": "Mask Evidence Corp", "tax_id": "GSTIN-MASK-EVD"},
+    ).json()["data"]["id"]
+    client.post(
+        f"/api/v1/customers/{cust_id}/identifiers",
+        headers=headers,
+        json={"identifier_type": "BANK_ACCOUNT", "identifier_value": "112233445566"},
+    )
+    pay_id = client.post(
+        "/api/v1/payments",
+        headers=headers,
+        json={
+            "transaction_date": "2026-08-15",
+            "amount": "50000.00",
+            "currency": "INR",
+            "narration": "PAYMENT FOR INV-MASK-001",
+            "bank_account_number": "112233445566",
+        },
+    ).json()["data"]["id"]
+    resp = client.post(f"/api/v1/reconciliation/evidence-collection/{pay_id}", headers=headers)
+    assert resp.status_code == 200
+    for item in resp.json()["data"]["payment_evidence"]["items"]:
+        assert "112233445566" not in item["description"]

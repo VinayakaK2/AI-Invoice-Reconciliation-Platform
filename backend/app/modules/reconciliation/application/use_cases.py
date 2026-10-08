@@ -62,6 +62,10 @@ from app.modules.reconciliation.domain.evidence_collection import (
     EvidenceCollectionEngine,
     EvidenceCollectionResult,
 )
+from app.modules.reconciliation.domain.evidence_normalization import (
+    EvidenceNormalizationEngine,
+    EvidenceNormalizationResult,
+)
 from app.modules.reconciliation.domain.rules import PayerIdentificationRuleEngine
 from app.shared.exceptions import ForbiddenError, NotFoundError, ValidationError
 
@@ -1341,6 +1345,124 @@ class BatchEvidenceCollectionUseCase:
                 results.append(res)
 
         return results
+
+
+# ==============================================================================
+# Phase 14.10 Evidence Normalization Application Use Cases
+# ==============================================================================
+
+
+class EvidenceNormalizationUseCase:
+    """Application use case for Phase 14.10 Evidence Normalization.
+
+    Coordinates upstream Phase 14.9 Evidence Collection and applies pure domain
+    normalization to convert raw evidence facts into canonical, version-aware
+    evidence structures.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Observed Financial Mutation: NONE).
+    - Multi-tenant fail-closed safety (strict scoping to authenticated company_id).
+    - Preserves all conflicting and missing signals without loss or resolution.
+    - Zero scoring / weighting: Output is purely factual representation for Phase 14.11.
+    """
+
+    def __init__(
+        self,
+        evidence_collection_use_case: EvidenceCollectionUseCase,
+        normalization_engine: Optional[EvidenceNormalizationEngine] = None,
+    ) -> None:
+        self.evidence_collection_use_case = evidence_collection_use_case
+        self.normalization_engine = normalization_engine or EvidenceNormalizationEngine()
+
+    def execute(
+        self,
+        payment_id: UUID,
+        company_id: UUID,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+        override_customer_id: Optional[UUID] = None,
+    ) -> EvidenceNormalizationResult:
+        """Execute Phase 14.10 Evidence Normalization within authenticated tenant boundary."""
+        # 1. Execute upstream Phase 14.9 Evidence Collection (inherits all candidate & tenant checks)
+        raw_result = self.evidence_collection_use_case.execute(
+            payment_id=payment_id,
+            company_id=company_id,
+            filter_criteria=filter_criteria,
+            override_customer_id=override_customer_id,
+        )
+
+        # 2. Normalize representation via pure domain engine
+        return self.normalization_engine.normalize_result_aggregate(
+            raw_result=raw_result,
+            customer_id=override_customer_id,
+        )
+
+
+class BatchEvidenceNormalizationUseCase:
+    """Batch evaluate evidence normalization across multiple unreconciled payments.
+
+    Guarantees:
+    - Bounded to MAX_BATCH_SIZE = 100 payments.
+    - Zero financial accounting state mutation across all evaluated payments.
+    - Strict tenant isolation: all evaluated payments belong to authenticated company_id.
+    """
+
+    MAX_BATCH_SIZE = 100
+
+    def __init__(
+        self,
+        payment_lookup_port: PaymentLookupPort,
+        evidence_normalization_use_case: EvidenceNormalizationUseCase,
+    ) -> None:
+        self.payment_lookup_port = payment_lookup_port
+        self.evidence_normalization_use_case = evidence_normalization_use_case
+
+    def execute(
+        self,
+        company_id: UUID,
+        payment_ids: Optional[List[UUID]] = None,
+        limit: int = 50,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+    ) -> List[EvidenceNormalizationResult]:
+        """Execute evidence normalization evaluation across payments within tenant boundary."""
+        if limit < 1 or limit > self.MAX_BATCH_SIZE:
+            raise ValidationError(
+                f"Batch limit must be between 1 and {self.MAX_BATCH_SIZE}."
+            )
+
+        results: List[EvidenceNormalizationResult] = []
+
+        if payment_ids:
+            if len(payment_ids) > self.MAX_BATCH_SIZE:
+                raise ValidationError(
+                    f"Requested {len(payment_ids)} payments exceeds maximum batch limit of {self.MAX_BATCH_SIZE}."
+                )
+            for p_id in payment_ids:
+                payment_context = self.payment_lookup_port.get_payment_intake_context(
+                    payment_id=p_id,
+                    company_id=company_id,
+                )
+                if payment_context:
+                    res = self.evidence_normalization_use_case.execute(
+                        payment_id=p_id,
+                        company_id=company_id,
+                        filter_criteria=filter_criteria,
+                    )
+                    results.append(res)
+        else:
+            payment_contexts = self.payment_lookup_port.list_unreconciled_payment_contexts(
+                company_id=company_id,
+                limit=limit,
+            )
+            for payment_context in payment_contexts:
+                res = self.evidence_normalization_use_case.execute(
+                    payment_id=payment_context.payment_id,
+                    company_id=company_id,
+                    filter_criteria=filter_criteria,
+                )
+                results.append(res)
+
+        return results
+
 
 
 

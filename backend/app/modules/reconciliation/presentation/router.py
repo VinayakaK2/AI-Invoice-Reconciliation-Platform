@@ -1,5 +1,6 @@
 """Reconciliation engine module presentation router."""
 
+import re
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, status
@@ -25,6 +26,8 @@ from app.modules.reconciliation.application.use_cases import (
     PartialMatchUseCase,
     EvidenceCollectionUseCase,
     BatchEvidenceCollectionUseCase,
+    EvidenceNormalizationUseCase,
+    BatchEvidenceNormalizationUseCase,
 )
 from app.modules.reconciliation.domain.candidate_filters import (
     CandidateFilterCriteria,
@@ -120,11 +123,27 @@ from app.modules.reconciliation.presentation.schemas import (
     PaymentEvidenceContextResponse,
     EvidenceCollectionRequest,
     EvidenceCollectionResponse,
+    RelevantIdentifiersResponse,
+    CanonicalEvidenceObjectResponse,
+    NormalizedCandidateBundleResponse,
+    NormalizedPaymentEvidenceContextResponse,
+    EvidenceNormalizationRequest,
+    EvidenceNormalizationResponse,
     mask_bank_account,
     mask_evidence_matched_value,
 )
 
 router = APIRouter(prefix="/reconciliation", tags=["Reconciliation"])
+
+
+def _mask_sensitive_evidence_details(details: str) -> str:
+    """Mask banking coordinates embedded in human-readable evidence descriptions."""
+    masked = re.sub(
+        r"(?<!\\d)\\d{8,}(?!\\d)",
+        lambda m: mask_bank_account(m.group()) or m.group(),
+        details,
+    )
+    return masked
 
 
 def _map_intake_result_to_response(result: PaymentIntakeResult) -> PaymentIntakeResponse:
@@ -1589,6 +1608,159 @@ def collect_evidence_for_payment(
         "success": True,
         "data": _map_evidence_collection_result_to_response(result),
     }
+
+
+# ==============================================================================
+# Phase 14.10 Evidence Normalization Router Endpoints
+# ==============================================================================
+
+
+def _map_canonical_evidence_object_to_response(item: Any) -> CanonicalEvidenceObjectResponse:
+    """Map CanonicalEvidenceObject domain value object to presentation schema."""
+    identifiers_dict = item.identifiers.to_dict()
+    identifiers_dto = RelevantIdentifiersResponse(
+        payment_id=identifiers_dict.get("payment_id"),
+        customer_id=identifiers_dict.get("customer_id"),
+        invoice_id=identifiers_dict.get("invoice_id"),
+        invoice_number=identifiers_dict.get("invoice_number"),
+        payment_reference=identifiers_dict.get("payment_reference"),
+        utr=identifiers_dict.get("utr"),
+        bank_account=mask_bank_account(identifiers_dict.get("bank_account"))
+        if identifiers_dict.get("bank_account")
+        else None,
+    )
+
+    return CanonicalEvidenceObjectResponse(
+        evidence_type=item.evidence_type.value,
+        source=item.source.value,
+        result=item.result.value,
+        strength=item.strength.value,
+        details=_mask_sensitive_evidence_details(item.details),
+        identifiers=identifiers_dto,
+        classification=item.classification.value,
+        rule_version=item.rule_version,
+        algorithm_version=item.algorithm_version,
+        target_entity=item.target_entity.value,
+        matched_value=mask_evidence_matched_value(item.evidence_type.value, item.matched_value)
+        if item.matched_value
+        else None,
+        expected_value=item.expected_value,
+        metadata=item.metadata,
+    )
+
+
+def _map_evidence_normalization_result_to_response(
+    result: Any,
+) -> EvidenceNormalizationResponse:
+    """Map EvidenceNormalizationResult domain aggregate to presentation schema."""
+    payment_evidence_dto = NormalizedPaymentEvidenceContextResponse(
+        payment_id=result.payment_evidence.payment_id,
+        company_id=result.payment_evidence.company_id,
+        items=[_map_canonical_evidence_object_to_response(i) for i in result.payment_evidence.items],
+        extracted_invoice_references=result.payment_evidence.extracted_invoice_references,
+        has_conflicting_identifiers=result.payment_evidence.has_conflicting_identifiers,
+    )
+
+    bundle_dtos = [
+        NormalizedCandidateBundleResponse(
+            invoice_id=b.invoice_id,
+            invoice_number=b.invoice_number,
+            items=[_map_canonical_evidence_object_to_response(i) for i in b.items],
+            has_conflicting_evidence=b.has_conflicting_evidence,
+            direct_evidence_count=b.direct_evidence_count,
+            supporting_evidence_count=b.supporting_evidence_count,
+            missing_evidence_count=b.missing_evidence_count,
+            conflicting_evidence_count=b.conflicting_evidence_count,
+        )
+        for b in result.candidate_bundles
+    ]
+
+    return EvidenceNormalizationResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        payment_evidence=payment_evidence_dto,
+        candidate_bundles=bundle_dtos,
+        total_evidence_items=result.total_evidence_items,
+        total_direct_items=result.total_direct_items,
+        total_supporting_items=result.total_supporting_items,
+        total_missing_items=result.total_missing_items,
+        total_conflicting_items=result.total_conflicting_items,
+        rule_version=result.rule_version,
+        algorithm_version=result.algorithm_version,
+        is_deterministic=result.is_deterministic,
+        normalized_at=result.normalized_at.isoformat(),
+    )
+
+
+@router.post(
+    "/evidence-normalization/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def normalize_evidence_for_payment(
+    payment_id: UUID,
+    payload: Optional[EvidenceNormalizationRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Convert raw reconciliation evidence into canonical, version-aware, structured evidence objects.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Observed Financial Mutation: NONE).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Semantic preservation: Retains factual meaning, preserving all conflicts and missing signals.
+    - Zero scoring / weighting: Provides canonical representation strictly for Phase 14.11.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    collection_use_case = EvidenceCollectionUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+
+    use_case = EvidenceNormalizationUseCase(
+        evidence_collection_use_case=collection_use_case,
+    )
+
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_evidence_normalization_result_to_response(result),
+    }
+
 
 
 

@@ -33,10 +33,24 @@ def mask_upi_vpa(vpa: Optional[str]) -> Optional[str]:
 
 
 def mask_evidence_matched_value(matched_val: str, ev_type: str) -> str:
-    """Mask sensitive banking coordinates in evidence matched value string."""
-    if ev_type == "EXACT_BANK_ACCOUNT":
+    """Mask sensitive banking coordinates in evidence matched value string.
+
+    Supports both (matched_val, ev_type) and (ev_type, matched_val) signatures
+    for maximum caller compatibility across modules.
+    """
+    # Detect if arguments were passed in reverse order (ev_type, matched_val)
+    all_known_types = {
+        "EXACT_BANK_ACCOUNT", "BANK_ACCOUNT_IDENTIFIER",
+        "EXACT_UPI_VPA", "EXACT_VIRTUAL_ACCOUNT", "UPI_VPA_IDENTIFIER",
+        "EXACT_ALIAS", "NORMALIZED_LEGAL_NAME", "PAYER_RAW_NAME_EXACT",
+        "NARRATION_TOKEN_OVERLAP", "REFERENCE_MATCH",
+    }
+    if matched_val in all_known_types and ev_type not in all_known_types:
+        ev_type, matched_val = matched_val, ev_type
+
+    if ev_type in ("EXACT_BANK_ACCOUNT", "BANK_ACCOUNT_IDENTIFIER"):
         return mask_bank_account(matched_val) or matched_val
-    if ev_type in ("EXACT_UPI_VPA", "EXACT_VIRTUAL_ACCOUNT"):
+    if ev_type in ("EXACT_UPI_VPA", "EXACT_VIRTUAL_ACCOUNT", "UPI_VPA_IDENTIFIER"):
         return mask_upi_vpa(matched_val) or matched_val
     return matched_val
 
@@ -692,6 +706,100 @@ class EvidenceCollectionResponse(BaseModel):
     total_conflicting_items: int
     is_deterministic: bool
     collected_at: str
+
+
+# ==============================================================================
+# Phase 14.10 Evidence Normalization Presentation Schemas
+# ==============================================================================
+
+
+class RelevantIdentifiersResponse(BaseModel):
+    """Presentation DTO for entity identifiers associated with normalized evidence."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: Optional[str] = None
+    customer_id: Optional[str] = None
+    invoice_id: Optional[str] = None
+    invoice_number: Optional[str] = None
+    payment_reference: Optional[str] = None
+    utr: Optional[str] = None
+    bank_account: Optional[str] = None
+
+
+class CanonicalEvidenceObjectResponse(BaseModel):
+    """Presentation DTO for a canonical normalized evidence object."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    evidence_type: str
+    source: str
+    result: str
+    strength: str
+    details: str
+    identifiers: RelevantIdentifiersResponse
+    classification: str
+    rule_version: str
+    algorithm_version: str
+    target_entity: str
+    matched_value: Optional[str] = None
+    expected_value: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class NormalizedCandidateBundleResponse(BaseModel):
+    """Presentation DTO for a candidate invoice's normalized evidence bundle."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_id: UUID
+    invoice_number: str
+    items: List[CanonicalEvidenceObjectResponse]
+    has_conflicting_evidence: bool
+    direct_evidence_count: int
+    supporting_evidence_count: int
+    missing_evidence_count: int
+    conflicting_evidence_count: int
+
+
+class NormalizedPaymentEvidenceContextResponse(BaseModel):
+    """Presentation DTO for payment-level normalized evidence facts."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    items: List[CanonicalEvidenceObjectResponse]
+    extracted_invoice_references: List[str]
+    has_conflicting_identifiers: bool
+
+
+class EvidenceNormalizationRequest(BaseModel):
+    """Request payload for evidence normalization evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class EvidenceNormalizationResponse(BaseModel):
+    """Presentation DTO for complete Phase 14.10 Evidence Normalization evaluation outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    payment_evidence: NormalizedPaymentEvidenceContextResponse
+    candidate_bundles: List[NormalizedCandidateBundleResponse]
+    total_evidence_items: int
+    total_direct_items: int
+    total_supporting_items: int
+    total_missing_items: int
+    total_conflicting_items: int
+    rule_version: str
+    algorithm_version: str
+    is_deterministic: bool
+    normalized_at: str
+
 
 
 
