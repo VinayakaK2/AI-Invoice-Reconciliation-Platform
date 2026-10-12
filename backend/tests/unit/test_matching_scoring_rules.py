@@ -189,7 +189,7 @@ class TestMatchingScoringEngine:
         # 2. Test INVOICE_NUMBER_MATCH (+35)
         inv_item = CanonicalEvidenceObject(
             evidence_type=NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION,
-            source=NormalizedEvidenceSource.INVOICE_INVOICE_NUMBER,
+            source=NormalizedEvidenceSource.PAYMENT_NARRATION,
             result=NormalizedEvidenceResult.MATCH,
             strength=NormalizedEvidenceStrength.EXACT,
             details="Invoice number referenced in payment narration",
@@ -945,6 +945,50 @@ class TestMatchingScoringEngine:
 
         score_res = engine.score_candidate(bundle=empty_bundle, payment_evidence=pay_ctx)
         # Fails closed: 0 points, never fabricating contradictory provenance
+        assert score_res.total_score == Decimal("0.00")
+        assert not any(c.signal_type == ScoringSignalType.INVOICE_NUMBER_MATCH for c in score_res.contributions)
+
+    def test_invalid_provenance_pairing_fails_closed(self) -> None:
+        """Contradictory or invalid provenance pairings fail closed without awarding score."""
+        engine = MatchingScoringEngine()
+        comp_id = uuid.uuid4()
+        payment_id = uuid.uuid4()
+        cand_id = uuid.uuid4()
+
+        # Inconsistent pairing: INVOICE_NUMBER_IN_NARRATION with PAYMENT_PAYMENT_REFERENCE
+        inconsistent_item = CanonicalEvidenceObject(
+            evidence_type=NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION,
+            source=NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE,
+            result=NormalizedEvidenceResult.MATCH,
+            strength=NormalizedEvidenceStrength.EXACT,
+            details="Inconsistent pairing test",
+            identifiers=NormalizedRelevantIdentifiers(invoice_id=cand_id, invoice_number="INV-001"),
+            classification=EvidenceClassification.DIRECT,
+            rule_version="1.0.0",
+            algorithm_version="14.10.0",
+            target_entity=NormalizedTargetEntity.INVOICE,
+            matched_value="INV-001",
+        )
+        pay_ctx = NormalizedPaymentEvidenceContext(
+            payment_id=payment_id,
+            company_id=comp_id,
+            items=[inconsistent_item],
+            extracted_invoice_references=["INV-001"],
+            has_conflicting_identifiers=False,
+        )
+        bundle = NormalizedCandidateBundle(
+            invoice_id=cand_id,
+            invoice_number="INV-001",
+            items=[inconsistent_item],
+            has_conflicting_evidence=False,
+            direct_evidence_count=1,
+            supporting_evidence_count=0,
+            missing_evidence_count=0,
+            conflicting_evidence_count=0,
+        )
+
+        score_res = engine.score_candidate(bundle=bundle, payment_evidence=pay_ctx)
+        # Inconsistent provenance must fail closed: 0 points, never accepted
         assert score_res.total_score == Decimal("0.00")
         assert not any(c.signal_type == ScoringSignalType.INVOICE_NUMBER_MATCH for c in score_res.contributions)
 

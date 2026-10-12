@@ -377,23 +377,38 @@ class MatchingScoringEngine:
             # Different invoice number was referenced in payment
             invoice_ref_conflict = True
 
-        # Fail closed: Only award score contribution when an authentic matching evidence item is present.
+        # Fail closed: Only award score contribution when an authentic matching evidence item is present
+        # and has a valid, consistent provenance pairing.
+        # Valid pairings:
+        #   - PAYMENT_REFERENCE with PAYMENT_PAYMENT_REFERENCE
+        #   - INVOICE_NUMBER_IN_NARRATION with PAYMENT_NARRATION
         # Never fabricate, guess, or synthesize contradictory evidence_type / source combinations.
         if invoice_ref_match and not invoice_ref_conflict and matching_inv_item is not None:
-            contributions.append(
-                ScoreContribution(
-                    signal_type=ScoringSignalType.INVOICE_NUMBER_MATCH,
-                    weight=self.config.invoice_number_match_weight,
-                    applied=True,
-                    evidence_type=matching_inv_item.evidence_type,
-                    source=matching_inv_item.source,
-                    result=matching_inv_item.result,
-                    reason=f"Candidate invoice number '{bundle.invoice_number}' explicitly referenced in payment",
-                    target_entity=matching_inv_item.target_entity,
-                    matched_value=bundle.invoice_number,
-                    expected_value=bundle.invoice_number,
+            is_valid_provenance = (
+                (
+                    matching_inv_item.evidence_type == NormalizedEvidenceType.PAYMENT_REFERENCE
+                    and matching_inv_item.source == NormalizedEvidenceSource.PAYMENT_PAYMENT_REFERENCE
+                )
+                or (
+                    matching_inv_item.evidence_type == NormalizedEvidenceType.INVOICE_NUMBER_IN_NARRATION
+                    and matching_inv_item.source == NormalizedEvidenceSource.PAYMENT_NARRATION
                 )
             )
+            if is_valid_provenance:
+                contributions.append(
+                    ScoreContribution(
+                        signal_type=ScoringSignalType.INVOICE_NUMBER_MATCH,
+                        weight=self.config.invoice_number_match_weight,
+                        applied=True,
+                        evidence_type=matching_inv_item.evidence_type,
+                        source=matching_inv_item.source,
+                        result=matching_inv_item.result,
+                        reason=f"Candidate invoice number '{bundle.invoice_number}' explicitly referenced in payment",
+                        target_entity=matching_inv_item.target_entity,
+                        matched_value=bundle.invoice_number,
+                        expected_value=bundle.invoice_number,
+                    )
+                )
 
         # --------------------------------------------------------------------------
         # 3. AMOUNT_EXACT_MATCH (+30 points)

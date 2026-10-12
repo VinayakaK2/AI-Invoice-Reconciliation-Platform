@@ -11,8 +11,8 @@
 | **Downstream Consumers** | Phase 14.12 Confidence Calibration, Phase 14.13 Decision Engine |
 | **Observed Financial Mutation** | **NONE** (Strictly Read-Only Evaluation, 0 DB Writes, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless in-memory domain evaluation) |
-| **Phase 14.11 Tests** | **21 Automated Tests** (15 pure domain rule & determinism tests, 6 integration/security tests, 100% Pass Rate) |
-| **Platform Total Suite** | **540 Total Tests Passed**, 0 Failures (Runtime: 185.23s) |
+| **Phase 14.11 Tests** | **22 Automated Tests** (16 pure domain rule & determinism tests, 6 integration/security tests, 100% Pass Rate) |
+| **Platform Total Suite** | **541 Total Tests Passed**, 0 Failures (Runtime: 196.60s) |
 | **Phase Status** | **IMPLEMENTATION REMEDIATED — READY FOR INDEPENDENT VERIFICATION** |
 
 ---
@@ -86,6 +86,7 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
 4. **Anti-Double Counting & Source Provenance Fidelity:**
    - If candidate invoice number is found in both payment reference and narration, it receives at most one `INVOICE_NUMBER_MATCH` (+35.00) credit (never +70.00).
    - Provenance is preserved: if matched via `payment_reference`, `source = payment.payment_reference` and `evidence_type = PAYMENT_REFERENCE`. If matched via narration, `source = payment.narration` and `evidence_type = INVOICE_NUMBER_IN_NARRATION`.
+   - Strict Provenance Pairing: `INVOICE_NUMBER_MATCH` contribution requires authentic evidence item pairing `(PAYMENT_REFERENCE, PAYMENT_PAYMENT_REFERENCE)` or `(INVOICE_NUMBER_IN_NARRATION, PAYMENT_NARRATION)`. Any missing item or contradictory pairing (e.g. `INVOICE_NUMBER_IN_NARRATION` from `PAYMENT_PAYMENT_REFERENCE`) fails closed: 0.00 score awarded, no contribution emitted, no synthetic provenance fabricated.
    - If customer counterparty is matched by name token and alias, it receives at most one `CUSTOMER_NAME_MATCH` (+20.00) credit.
 
 5. **Direct Counterparty Identifiers vs Transaction Metadata:**
@@ -115,7 +116,8 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
 
 1. `backend/app/modules/reconciliation/domain/matching_scoring.py` (REMEDIATED)
    - Core domain aggregates, value objects, and deterministic engine: `ScoringSignalType`, `ScoringWeightsConfig`, `ScoreContribution`, `CandidateScoreResult`, `MatchingScoringResult`, `MatchingScoringEngine`.
-   - Enhanced `INVOICE_NUMBER_MATCH` to check both bundle items and payment-level `payment_items` across both `payment_reference` and `narration`, preserving exact source provenance (`PAYMENT_PAYMENT_REFERENCE` vs `PAYMENT_NARRATION`) and enforcing anti-double-counting (+35 once).
+   - Enhanced `INVOICE_NUMBER_MATCH` to evaluate both candidate bundle items and payment-level `payment_items` across both `payment_reference` and `narration`, enforcing strict provenance pairing validation (`(PAYMENT_REFERENCE, PAYMENT_PAYMENT_REFERENCE)` and `(INVOICE_NUMBER_IN_NARRATION, PAYMENT_NARRATION)`).
+   - Eliminated synthetic fallback logic entirely. Contradictory pairings fail closed (0.00 score, no fabricated provenance).
    - Refined `IDENTIFIER_MATCH` docstrings and scoring to strictly distinguish counterparty identifiers (Bank Account, UPI VPA) from transaction references (UTR).
 2. `backend/app/modules/reconciliation/domain/__init__.py` (MODIFIED)
    - Exported Phase 14.11 domain classes alongside Phase 14.10 and earlier modules.
@@ -129,7 +131,7 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
      - `POST /api/v1/reconciliation/matching-scoring/batch`
      - `POST /api/v1/reconciliation/matching-scoring/{payment_id}`
 6. `backend/tests/unit/test_matching_scoring_rules.py` (EXTENDED)
-   - 15 comprehensive unit tests covering single signal allocations, mathematical clamping, anti-double counting, missing evidence handling, conflict suppression, 100-permutation determinism, tie handling, weight configuration, payment-reference invoice provenance, narration invoice provenance, reference + narration single-award anti-double counting, unrelated/conflicting reference handling, UTR non-identifier scoring exclusion, UPI VPA identifier scoring, and fail-closed absence of contradictory provenance synthesis.
+   - 16 comprehensive unit tests covering single signal allocations, mathematical clamping, anti-double counting, missing evidence handling, conflict suppression, 100-permutation determinism, tie handling, weight configuration, payment-reference invoice provenance, narration invoice provenance, reference + narration single-award anti-double counting, unrelated/conflicting reference handling, UTR non-identifier scoring exclusion, UPI VPA identifier scoring, fail-closed absence of authentic evidence item, and fail-closed rejection of contradictory/invalid provenance pairing.
 7. `backend/tests/integration/test_matching_scoring_api.py` (MODIFIED)
    - 6 integration tests verifying REST e2e flow, zero financial mutation, cross-tenant IDOR protection, customer override IDOR protection, unauthenticated rejection, and batch processing.
 
@@ -139,18 +141,18 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
 
 ### 6.1 Targeted Test Execution
 ```text
-tests/unit/test_matching_scoring_rules.py ...............                [100%]
-15 passed in 0.69s
+tests/unit/test_matching_scoring_rules.py ................               [100%]
+16 passed in 0.44s
 
 tests/integration/test_matching_scoring_api.py ......                    [100%]
-6 passed in 5.46s
+6 passed in 4.82s
 ```
 
 ### 6.2 Full Platform Regression Suite
 ```text
-======================= 540 passed in 185.23s (0:03:05) =======================
+======================= 541 passed in 196.60s (0:03:16) =======================
 ```
-All 540 tests in the repository pass with zero errors, zero warnings, and zero regressions.
+All 541 tests in the repository pass with zero errors, zero warnings, and zero regressions.
 
 ---
 
@@ -160,6 +162,7 @@ Phase 14.11 remediation fulfills all requirements and quality gates:
 - [x] Invoice reference match evaluates both payment reference and narration with source fidelity.
 - [x] Anti-double counting guarantees exactly +35.00 once when both reference and narration match.
 - [x] Provenance correctly distinguishes `payment.payment_reference` vs `payment.narration`.
+- [x] Strict provenance pairing validation fails closed without fabricating synthetic provenance.
 - [x] Direct counterparty identifiers (Bank Account, UPI VPA) award +40.00; UTR presence does not award identifier score.
 - [x] Mathematical model and Rule 2.4 weights implemented and verified.
 - [x] Pure determinism and Decimal precision.
@@ -168,6 +171,6 @@ Phase 14.11 remediation fulfills all requirements and quality gates:
 - [x] Non-decision boundary enforced (no decisions, no probabilities).
 - [x] Tenant isolation and IDOR protection verified.
 - [x] Empirical validation status flagged as provisional.
-- [x] Full platform regression passed (539/539).
+- [x] Full platform regression passed (541/541).
 
 **Phase 14.11 Status: IMPLEMENTATION REMEDIATED — READY FOR INDEPENDENT VERIFICATION.**
