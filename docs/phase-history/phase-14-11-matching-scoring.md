@@ -12,8 +12,8 @@
 | **Observed Financial Mutation** | **NONE** (Strictly Read-Only Evaluation, 0 DB Writes, `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`) |
 | **Database Migrations** | **0 New Migrations** (Stateless in-memory domain evaluation) |
 | **Phase 14.11 Tests** | **22 Automated Tests** (16 pure domain rule & determinism tests, 6 integration/security tests, 100% Pass Rate) |
-| **Platform Total Suite** | **541 Total Tests Passed**, 0 Failures (Runtime: 196.60s) |
-| **Phase Status** | **IMPLEMENTATION REMEDIATED — READY FOR INDEPENDENT VERIFICATION** |
+| **Platform Total Suite** | **541 Total Tests Passed**, 0 Failures (Runtime: 105.89s) |
+| **Phase Status** | **FROZEN** (Freeze Certified on `main` via PR #9, PR #10, and PR #11) |
 
 ---
 
@@ -142,15 +142,15 @@ on all domain objects, DTOs, and REST responses until empirical offline machine-
 ### 6.1 Targeted Test Execution
 ```text
 tests/unit/test_matching_scoring_rules.py ................               [100%]
-16 passed in 0.44s
+16 passed in 0.52s
 
 tests/integration/test_matching_scoring_api.py ......                    [100%]
-6 passed in 4.82s
+6 passed in 2.83s
 ```
 
 ### 6.2 Full Platform Regression Suite
 ```text
-======================= 541 passed in 196.60s (0:03:16) =======================
+======================= 541 passed in 105.89s (0:01:45) =======================
 ```
 All 541 tests in the repository pass with zero errors, zero warnings, and zero regressions.
 
@@ -158,8 +158,9 @@ All 541 tests in the repository pass with zero errors, zero warnings, and zero r
 
 ## 7. Status Declaration
 
-Phase 14.11 remediation fulfills all requirements and quality gates:
-- [x] Invoice reference match evaluates both payment reference and narration with source fidelity.
+Phase 14.11 implementation and documentation synchronization fulfill all requirements and quality gates:
+- [x] Authoritative Rule 2.4 synchronized in `docs/domain/business-rules.md` (invoice reference in payment_reference or narration).
+- [x] Invoice reference match evaluates both payment reference and narration with strict source fidelity.
 - [x] Anti-double counting guarantees exactly +35.00 once when both reference and narration match.
 - [x] Provenance correctly distinguishes `payment.payment_reference` vs `payment.narration`.
 - [x] Strict provenance pairing validation fails closed without fabricating synthetic provenance.
@@ -167,10 +168,12 @@ Phase 14.11 remediation fulfills all requirements and quality gates:
 - [x] Mathematical model and Rule 2.4 weights implemented and verified.
 - [x] Pure determinism and Decimal precision.
 - [x] Conflict suppression verified.
-- [x] Zero financial mutation verified.
+- [x] Zero financial mutation verified (`len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`).
 - [x] Non-decision boundary enforced (no decisions, no probabilities).
 - [x] Tenant isolation and IDOR protection verified.
 - [x] Empirical validation status flagged as provisional.
-- [x] Full platform regression passed (541/541).
+- [x] Merged to `main` via PR #9, PR #10, and PR #11.
+- [x] Full platform regression passed on `main` (541/541 passed in 105.89s).
 
-**Phase 14.11 Status: IMPLEMENTATION REMEDIATED — READY FOR INDEPENDENT VERIFICATION.**
+**Phase 14.11 Status: FROZEN.**  
+**Next Permitted Phase: Phase 14.12 — Confidence Calibration.**

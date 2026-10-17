@@ -195,10 +195,44 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 - [x] Full platform regression suite: 453 tests passing (100%), 0 failures, 137.07s runtime
 - [x] Phase 14.7 phase history and freeze certification completed (`docs/phase-history/phase-14-7-multi-invoice-matching.md`)
 
+### Phase 14.8 — Reconciliation Engine: Combination Matching [FROZEN]
+- [x] Domain layer: `CombinationMatchRuleEngine`, `CombinationMatchHypothesis`, `CombinationMatchResult`, `CombinationMatchCriteria`
+- [x] Strict Rule M-3 FIFO aging heuristic with truncation ambiguity override defense
+- [x] Combinatorial complexity hard-bounding ($2 \le k \le 4$, $n \le 30$) and zero tolerance loosening (`amount_tolerance == Decimal('0.00')`)
+- [x] Application and REST API layer with fail-closed multi-tenancy and zero financial mutation
+- [x] 32 automated tests passing, 486 platform regression suite passing
+- [x] Phase 14.8 freeze certified (`docs/phase-history/phase-14-8-combination-matching.md`)
+
+### Phase 14.9 — Reconciliation Engine: Evidence Collection [FROZEN]
+- [x] Domain layer: `EvidenceCollectionEngine`, `CandidateEvidenceBundle`, `PaymentEvidenceContext`, `EvidenceClassification` (`DIRECT`, `SUPPORTING`, `MISSING`, `CONFLICTING`)
+- [x] Strict 4-tier factual classification with zero financial mutation and serialized determinism across 100 permutations
+- [x] Multi-tenant cross-candidate isolation and fail-closed REST API endpoint
+- [x] 15 automated tests passing, 501 platform regression suite passing
+- [x] Phase 14.9 freeze certified (`docs/phase-history/phase-14-9-evidence-collection.md`)
+
+### Phase 14.10 — Reconciliation Engine: Evidence Normalization [FROZEN]
+- [x] Domain layer: `EvidenceNormalizationEngine`, `CanonicalEvidenceObject`, `NormalizedCandidateBundle`, `NormalizedEvidenceResult`, `NormalizedEvidenceStrength`
+- [x] Strict semantic preservation (`Raw meaning == Normalized meaning`), fail-closed defense against unknown target entities and unmapped results
+- [x] Zero financial mutation, deduplication without loss, and 100-permutation bitwise serialized determinism
+- [x] 18 automated tests passing, 519 platform regression suite passing
+- [x] Phase 14.10 freeze certified (`docs/phase-history/phase-14-10-evidence-normalization.md`)
+
+### Phase 14.11 — Reconciliation Engine: Matching & Scoring [FROZEN]
+- [x] Domain layer: `MatchingScoringEngine`, `ScoringWeightsConfig`, `ScoreContribution`, `CandidateScoreResult`, `MatchingScoringResult`
+- [x] Deterministic Rule 2.4 evidence scoring: `IDENTIFIER_MATCH` (+40), `INVOICE_NUMBER_MATCH` (+35), `AMOUNT_EXACT_MATCH` (+30), `CUSTOMER_NAME_MATCH` (+20), `DATE_PROXIMITY_MATCH` (+10), `HISTORICAL_PATTERN` (+5) clamped to [0.00, 100.00]
+- [x] Authoritative Rule 2.4 synchronized in `docs/domain/business-rules.md` (candidate invoice number in payment_reference or narration)
+- [x] Strict source provenance pairing validation: only authentic `(PAYMENT_REFERENCE, PAYMENT_PAYMENT_REFERENCE)` and `(INVOICE_NUMBER_IN_NARRATION, PAYMENT_NARRATION)` award score; missing or contradictory pairings fail closed (0.00 score, no synthetic provenance fabricated)
+- [x] Anti-double counting across references/narration and customer aliases; conflict suppression rules; zero points for missing signals
+- [x] Direct counterparty identifiers (Bank Account, UPI VPA) award +40.00; UTR presence excluded from identifier points
+- [x] Non-decision boundary strictly maintained: no auto-reconciliation decisions, no calibrated probabilities, zero database mutations (`len(db.dirty) == 0`)
+- [x] Fail-closed multi-tenancy and IDOR protection on single and batch endpoints
+- [x] 22 automated tests passing (16 unit, 6 integration), 541 platform regression suite passing (0 failures, 105.89s runtime on `main`)
+- [x] Merged to `main` via PR #9, PR #10, and PR #11; Phase 14.11 freeze certified (`docs/phase-history/phase-14-11-matching-scoring.md`)
+
 ---
 
 ## Disambiguation Rules:
-1. **Reconciliation Engine Sub-Phases**: Phase 14.1 (Payment Intake), Phase 14.2 (Payer Identification), Phase 14.3 (Candidate Invoice Generation), Phase 14.4 (Candidate Filtering), Phase 14.5 (Exact Matching), Phase 14.6 (Partial Matching), Phase 14.7 (Multi-Invoice Matching), Phase 14.8 (Combination Matching).
+1. **Reconciliation Engine Sub-Phases**: Phase 14.1 (Payment Intake), Phase 14.2 (Payer Identification), Phase 14.3 (Candidate Invoice Generation), Phase 14.4 (Candidate Filtering), Phase 14.5 (Exact Matching), Phase 14.6 (Partial Matching), Phase 14.7 (Multi-Invoice Matching), Phase 14.8 (Combination Matching), Phase 14.9 (Evidence Collection), Phase 14.10 (Evidence Normalization), Phase 14.11 (Matching & Scoring).
 2. **`retrieval_priority` vs Candidate Scoring**: `retrieval_priority` (0–100) is a Phase 14.3 candidate presentation heuristic; composite candidate scoring (`match_score`) belongs strictly to Phase 14.11. Phases 14.5, 14.6, and 14.7 produce factual matching signals only.
 3. **`AUTO_ELIGIBLE`**: High evidence score qualification for expedited human review. NOT `AUTO_APPLIED`.
 4. **Zero LLM Authority**: Deterministic rules decide. AI assists text extraction only. Humans resolve uncertainty.
@@ -206,8 +240,8 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 ---
 
 ## Up Next:
-- **Phase 14.8**: Combination Matching Engine (competing subset evaluation across multiple candidate invoices, FIFO aging heuristics / Rule M-3, bounded candidate resolution).
-- **Phase 14.9–14.13**: Evidence Collection & Normalization (14.9–14.10), Confidence Scoring (14.11), Decision Engine (14.12), Payment Allocation (14.13). Note: Generalized M:N (Many Payments to Many Invoices) is deferred to future post-core roadmap.
+- **Phase 14.12**: Confidence Calibration Engine (producing statistically and empirically grounded confidence metrics from deterministic evidence signals, separate from raw scores).
+- **Phase 14.13**: Decision Engine (policy evaluation, `AUTO_ELIGIBLE`, `MATCH_SUGGESTED`, `REVIEW_REQUIRED`, `AMBIGUOUS`).
 - **Phase 15**: Human Review & Exception Workflows.
 - **Phase 16**: Review Center UI & Frontend Integration.
 

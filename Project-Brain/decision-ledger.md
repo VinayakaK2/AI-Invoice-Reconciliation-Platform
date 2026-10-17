@@ -291,8 +291,8 @@ This ledger documents the frozen architectural decisions made for the platform.
 ---
 
 ## ADR-019: Deterministic Matching & Scoring Engine & Rule 2.4 Evidence Aggregation
-- **Date**: 2026-10-08
-- **Status**: Implemented / Remediated (Verification Pending)
+- **Date**: 2026-10-08 (Freeze Certified: 2026-10-17)
+- **Status**: Accepted / Frozen
 - **Context**: The reconciliation pipeline requires an objective, reproducible mathematical scoring layer to aggregate canonical normalized evidence (Phase 14.10) for candidate invoices into a bounded score between 0.00 and 100.00. The engine must adhere to Rule 2.4 weights, clamp total scores safely, suppress points when conflicting evidence exists, prevent double-counting across overlapping sources, award zero points for missing signals, maintain zero financial mutation, ensure fail-closed multi-tenancy, and strictly refrain from making financial disposition decisions (Phase 14.13) or probabilistic claims (Phase 14.12).
 - **Decision**:
   1. **Strict Separation of Concerns**:
@@ -311,14 +311,14 @@ This ledger documents the frozen architectural decisions made for the platform.
   4. **Conflict Suppression & Zero Missing Credit**:
      Any evidence classified as `MISSING` awards 0.00 points. Any active `CONFLICTING` evidence or conflicting canonical result suppresses the corresponding positive score contribution (`applied = False`, contribution = 0.00). Currency conflicts suppress amount match; bank account conflicts suppress identifier match; causality conflicts suppress date proximity; conflicting invoice references suppress invoice number match.
   5. **Anti-Double Counting & Source Provenance Fidelity**:
-     Invoice number matches appearing in both payment reference and narration are credited at most once (+35.00). Actual source provenance is strictly preserved (`payment.payment_reference` vs `payment.narration`), never misrepresenting payment-reference matches as narration. Customer name token and alias matches are credited at most once (+20.00).
+     Invoice number matches appearing in both payment reference and narration are credited at most once (+35.00). Actual source provenance is strictly preserved (`payment.payment_reference` vs `payment.narration`), never misrepresenting payment-reference matches as narration. Strict provenance pairing validation enforces that only valid pairings `(PAYMENT_REFERENCE, PAYMENT_PAYMENT_REFERENCE)` and `(INVOICE_NUMBER_IN_NARRATION, PAYMENT_NARRATION)` award score contributions; missing or contradictory pairings fail closed (0.00 score, no fabricated provenance). Customer name token and alias matches are credited at most once (+20.00).
   6. **Zero Financial Mutation**:
      Evaluates candidates in-memory. Zero database mutations (`len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`).
   7. **Serialized Determinism & Ranking Total Order**:
      Candidate scores are deterministically ranked by `(-total_score, invoice_number, str(invoice_id))`. Scoring timestamp (`scored_at`) is excluded from serialized deterministic comparison payloads. Bit-for-bit invariance verified over 100 random permutations.
   8. **Multi-Tenant Security (Fail-Closed IDOR)**:
      Endpoints `POST /api/v1/reconciliation/matching-scoring/{payment_id}` and `POST /api/v1/reconciliation/matching-scoring/batch` enforce company context scoping via `current_user.company_id`. Cross-tenant payments or customer overrides return HTTP 404. Sensitive bank coordinates are masked in contribution DTOs.
-- **Consequences**: Certified deterministic matching & scoring engine with 22 automated tests (16 unit, 6 integration/security). Full platform regression suite passed (541 tests, 0 failures, 196.60s runtime). Phase 14.11 is remediated on feature branch and ready for independent verification. Downstream Phase 14.12 (Confidence Calibration) will build upon this foundation.
+- **Consequences**: Certified deterministic matching & scoring engine with 22 automated tests (16 unit, 6 integration/security). Full platform regression suite passed (541 tests, 0 failures, 105.89s runtime on `main`). Merged to `main` via PR #9, PR #10, and PR #11. Phase 14.11 is certified and FROZEN. Downstream Phase 14.12 (Confidence Calibration) is the next permitted phase.
 
 
 
