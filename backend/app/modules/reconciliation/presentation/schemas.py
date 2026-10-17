@@ -877,6 +877,87 @@ class BatchMatchingScoringResponse(BaseModel):
     total_evaluated: int
 
 
+# ==============================================================================
+# Phase 14.12 Confidence Engine Presentation Schemas
+# ==============================================================================
+
+
+class ConfidenceAdjustmentFactorResponse(BaseModel):
+    """Presentation DTO for a single confidence adjustment factor."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    factor_type: str
+    delta: str
+    description: str
+
+
+class CandidateConfidenceAssessmentResponse(BaseModel):
+    """Presentation DTO for a candidate invoice's confidence assessment outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    invoice_id: UUID
+    candidate_id: Optional[UUID] = None
+    payment_id: Optional[UUID] = None
+    invoice_number: str
+    confidence_score: str
+    confidence_level: str
+    base_match_score: str
+    match_score: Optional[str] = None
+    has_direct_evidence: bool
+    direct_evidence_present: Optional[bool] = None
+    has_conflicting_evidence: bool
+    conflicting_evidence_present: Optional[bool] = None
+    has_incomplete_evidence: bool = False
+    incomplete_evidence_present: Optional[bool] = None
+    adjustment_factors: List[ConfidenceAdjustmentFactorResponse]
+    rule_version: str
+    scoring_algorithm_version: str
+    confidence_algorithm_version: str
+    algorithm_version: Optional[str] = None
+    is_statistically_calibrated: bool
+
+
+class ConfidenceAssessmentRequest(BaseModel):
+    """Request payload for confidence assessment evaluation."""
+
+    override_customer_id: Optional[UUID] = None
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class ConfidenceAssessmentResponse(BaseModel):
+    """Presentation DTO for complete Phase 14.12 Confidence Engine outcome."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    payment_id: UUID
+    company_id: UUID
+    candidate_assessments: List[CandidateConfidenceAssessmentResponse]
+    total_candidates_evaluated: int
+    rule_version: str
+    scoring_algorithm_version: str
+    confidence_algorithm_version: str
+    is_deterministic: bool
+    is_statistically_calibrated: bool
+    evaluated_at: str
+
+
+class BatchConfidenceAssessmentRequest(BaseModel):
+    """Request payload for batch confidence assessment evaluation."""
+
+    payment_ids: Optional[List[UUID]] = None
+    limit: int = Field(default=50, ge=1, le=100)
+    filter_criteria: Optional[CandidateFilterCriteriaRequest] = None
+
+
+class BatchConfidenceAssessmentResponse(BaseModel):
+    """Presentation response for batch confidence assessment evaluation."""
+
+    results: List[ConfidenceAssessmentResponse]
+    total_evaluated: int
+
+
 
 
 

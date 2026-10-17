@@ -320,5 +320,39 @@ This ledger documents the frozen architectural decisions made for the platform.
      Endpoints `POST /api/v1/reconciliation/matching-scoring/{payment_id}` and `POST /api/v1/reconciliation/matching-scoring/batch` enforce company context scoping via `current_user.company_id`. Cross-tenant payments or customer overrides return HTTP 404. Sensitive bank coordinates are masked in contribution DTOs.
 - **Consequences**: Certified deterministic matching & scoring engine with 22 automated tests (16 unit, 6 integration/security). Full platform regression suite passed (541 tests, 0 failures, 105.89s runtime on `main`). Merged to `main` via PR #9, PR #10, and PR #11. Phase 14.11 is certified and FROZEN. Downstream Phase 14.12 (Confidence Calibration) is the next permitted phase.
 
+---
+
+## ADR-020: Deterministic Confidence Engine & Contract Remediation
+- **Date**: 2026-10-17
+- **Status**: Implemented / Ready for Independent Verification
+- **Context**: The reconciliation pipeline requires an objective, reproducible confidence assessment layer to evaluate candidates after Phase 14.11 matching & scoring, before passing them to the Phase 14.13 decision engine. Initial implementation introduced unauthorized mathematical penalties (50% conflict deduction, 40.00 conflict ceiling, 15.00 ambiguity deduction). The review blocker mandated removing these invented penalties, preserving Phase 14.11 score without double counting, factually surfacing conflicts, decoupling VERY_HIGH from direct counterparty evidence (Rule P-1), and enforcing a canonical versioned policy.
+- **Decision**:
+  1. **Strict Architectural Separation**:
+     $$\text{Evidence} \neq \text{Scoring} \neq \text{Confidence} \neq \text{Decision} \neq \text{Approval} \neq \text{Financial Mutation}$$
+     Confidence assesses evidence quality and candidate distinctiveness. Confidence does NOT make reconciliation decisions or determine allocations.
+     $$\text{Confidence Level} \neq \text{Decision} \quad \text{and} \quad \text{VERY\_HIGH does not imply AUTO\_ELIGIBLE}$$
+  2. **Direct Base Score Preservation (No Double Counting, No Invented Penalties)**:
+     Candidate confidence score directly anchors to the Phase 14.11 base match score ($\Delta = 0.00$). Base evidence signals are NOT re-added or double counted, and no unauthorized penalties, dampening, or ceilings are applied.
+  3. **Factual Conflict Observation**:
+     Contradictory or conflicting evidence from candidate bundles or payment context is surfaced factually (`has_conflicting_evidence = True`, `ConfidenceFactorType.CONFLICT_OBSERVED`, $\Delta = 0.00$).
+  4. **Canonical Qualitative Confidence Level Mapping**:
+     - `VERY_HIGH`: $90.00 \le \text{score} \le 100.00$ (highest deterministic confidence band; does NOT require direct identifier grounding. Direct identifier presence is a factual evidence flag relevant to downstream Phase 14.13 decision safety, especially `AUTO_ELIGIBLE`).
+     - `HIGH`: $70.00 \le \text{score} < 90.00$.
+     - `MEDIUM`: $40.00 \le \text{score} < 70.00$.
+     - `LOW`: $0.00 < \text{score} < 40.00$.
+     - `NONE`: $\text{score} == 0.00$.
+  5. **Canonical, Versioned, Immutable Policy**:
+     Configuration is formalized as `ConfidencePolicy` (`CANONICAL_CONFIDENCE_POLICY`), preventing hidden mutable settings from altering confidence semantics.
+  6. **Statistical Calibration Transparency**:
+     Explicitly flagged as `is_statistically_calibrated=False` across all domain objects and responses, avoiding pseudo-scientific probability claims.
+  7. **Total Determinism & Total Order Ranking**:
+     Candidates are ranked deterministically by `(-confidence_score, -base_match_score, invoice_number, str(invoice_id))`. 100-permutation invariance verified.
+  8. **Zero Financial Mutation**:
+     Evaluated in-memory. Zero database mutations (`len(db.dirty) == 0`).
+  9. **Tenant Isolation**:
+     Strict `company_id` enforcement across use cases and REST endpoints. Cross-tenant access fails closed with HTTP 404.
+- **Consequences**: Canonical decoupled implementation verified with 32 automated tests (24 unit, 8 integration/security). Platform regression suite passing 573/573 tests. Status set to `IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION`.
+
+
 
 
