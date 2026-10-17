@@ -75,6 +75,7 @@ from app.modules.reconciliation.domain.confidence_engine import (
     ConfidenceConfig,
     ConfidenceEngine,
     ConfidenceEngineResult,
+    ConfidencePolicy,
 )
 from app.modules.reconciliation.domain.rules import PayerIdentificationRuleEngine
 from app.shared.exceptions import ForbiddenError, NotFoundError, ValidationError
@@ -1635,7 +1636,8 @@ class ConfidenceAssessmentUseCase:
         filter_criteria: Optional[CandidateFilterCriteria] = None,
         override_customer_id: Optional[UUID] = None,
         scoring_config: Optional[ScoringWeightsConfig] = None,
-        confidence_config: Optional[ConfidenceConfig] = None,
+        confidence_policy: Optional[ConfidencePolicy] = None,
+        confidence_config: Optional[ConfidencePolicy] = None,
     ) -> ConfidenceEngineResult:
         """Execute Phase 14.12 Confidence Assessment within authenticated tenant boundary."""
         # 1. Fetch upstream normalization result (inherits candidate lookup and tenant validation)
@@ -1657,10 +1659,11 @@ class ConfidenceAssessmentUseCase:
             )
         scoring_result = scoring_engine.evaluate(normalization_result=normalization_result)
 
-        # 3. Configure confidence engine if custom configuration provided
+        # 3. Configure confidence engine if custom policy provided
         engine = self.confidence_engine
-        if confidence_config is not None:
-            engine = ConfidenceEngine(config=confidence_config)
+        policy = confidence_policy or confidence_config
+        if policy is not None:
+            engine = ConfidenceEngine(policy=policy)
 
         # 4. Evaluate deterministic confidence across all scored candidates
         return engine.evaluate(
@@ -1695,7 +1698,8 @@ class BatchConfidenceAssessmentUseCase:
         limit: int = 50,
         filter_criteria: Optional[CandidateFilterCriteria] = None,
         scoring_config: Optional[ScoringWeightsConfig] = None,
-        confidence_config: Optional[ConfidenceConfig] = None,
+        confidence_policy: Optional[ConfidencePolicy] = None,
+        confidence_config: Optional[ConfidencePolicy] = None,
     ) -> List[ConfidenceEngineResult]:
         """Execute confidence assessment evaluation across payments within tenant boundary."""
         if limit < 1 or limit > self.MAX_BATCH_SIZE:
@@ -1703,6 +1707,7 @@ class BatchConfidenceAssessmentUseCase:
                 f"Batch limit must be between 1 and {self.MAX_BATCH_SIZE}."
             )
 
+        policy = confidence_policy or confidence_config
         results: List[ConfidenceEngineResult] = []
 
         if payment_ids:
@@ -1721,7 +1726,7 @@ class BatchConfidenceAssessmentUseCase:
                         company_id=company_id,
                         filter_criteria=filter_criteria,
                         scoring_config=scoring_config,
-                        confidence_config=confidence_config,
+                        confidence_policy=policy,
                     )
                     results.append(res)
         else:
@@ -1735,7 +1740,7 @@ class BatchConfidenceAssessmentUseCase:
                     company_id=company_id,
                     filter_criteria=filter_criteria,
                     scoring_config=scoring_config,
-                    confidence_config=confidence_config,
+                    confidence_policy=policy,
                 )
                 results.append(res)
 

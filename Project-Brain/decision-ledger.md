@@ -322,35 +322,35 @@ This ledger documents the frozen architectural decisions made for the platform.
 
 ---
 
-## ADR-020: Deterministic Confidence Engine & Evidence Calibration
+## ADR-020: Deterministic Confidence Engine & Contract Remediation
 - **Date**: 2026-10-17
 - **Status**: Implemented / Ready for Independent Verification
-- **Context**: The reconciliation pipeline requires an objective, reproducible confidence assessment layer to evaluate candidates after Phase 14.11 matching & scoring, before passing them to the Phase 14.13 decision engine. Confidence must translate aggregated candidate match scores and normalized evidence into a canonical qualitative rating and bounded numeric score $[0.00, 100.00]$ without mutating financial state, without double-counting base evidence weights, without inventing probabilistic Bayesian/ML models, and without making financial decisions (`AUTO_ELIGIBLE` or allocations).
+- **Context**: The reconciliation pipeline requires an objective, reproducible confidence assessment layer to evaluate candidates after Phase 14.11 matching & scoring, before passing them to the Phase 14.13 decision engine. Initial implementation introduced unauthorized mathematical penalties (50% conflict deduction, 40.00 conflict ceiling, 15.00 ambiguity deduction). The review blocker mandated removing these invented penalties, preserving Phase 14.11 score without double counting, factually surfacing conflicts, grounding VERY_HIGH in direct counterparty evidence (Rule P-1), and enforcing a canonical versioned policy.
 - **Decision**:
   1. **Strict Architectural Separation**:
      $$\text{Evidence} \neq \text{Scoring} \neq \text{Confidence} \neq \text{Decision} \neq \text{Approval} \neq \text{Financial Mutation}$$
-     Confidence assesses evidence quality and candidate distinctiveness. Confidence does NOT make reconciliation decisions.
-  2. **Deterministic Base Score Anchoring**:
-     Unconflicted candidates anchor directly to their Phase 14.11 base match score. Base evidence signals are NOT re-added or double counted.
-  3. **Qualitative Confidence Level Mapping**:
-     - `VERY_HIGH`: $[90.00, 100.00]$
-     - `HIGH`: $[70.00, 89.99]$
-     - `MEDIUM`: $[40.00, 69.99]$
-     - `LOW`: $[0.01, 39.99]$
-     - `NONE`: $0.00$
-  4. **Active Conflict Suppression & Hard Ceiling**:
-     Candidates with active conflicting evidence incur a 50% deduction and are clamped to a hard ceiling of $40.00$, preventing high-confidence classification.
-  5. **Multi-Candidate Ambiguity Dampening**:
-     When competing candidates have scores within 10.00 points of each other, an ambiguity penalty of -15.00 points is deducted to reflect candidate competition.
+     Confidence assesses evidence quality and candidate distinctiveness. Confidence does NOT make reconciliation decisions or determine allocations.
+  2. **Direct Base Score Preservation (No Double Counting, No Invented Penalties)**:
+     Candidate confidence score directly anchors to the Phase 14.11 base match score ($\Delta = 0.00$). Base evidence signals are NOT re-added or double counted, and no unauthorized penalties, dampening, or ceilings are applied.
+  3. **Factual Conflict Observation**:
+     Contradictory or conflicting evidence from candidate bundles or payment context is surfaced factually (`has_conflicting_evidence = True`, `ConfidenceFactorType.CONFLICT_OBSERVED`, $\Delta = 0.00$).
+  4. **Semantic Qualitative Confidence Level Mapping**:
+     - `VERY_HIGH`: Score $\ge 90.00$ AND direct counterparty identifier match verified (Rule P-1).
+     - `HIGH`: Score $\ge 70.00$ (or Score $\ge 90.00$ without direct counterparty identifier grounding).
+     - `MEDIUM`: Score $\ge 40.00$.
+     - `LOW`: Score $> 0.00$.
+     - `NONE`: Score $== 0.00$.
+  5. **Canonical, Versioned, Immutable Policy**:
+     Configuration is formalized as `ConfidencePolicy` (`CANONICAL_CONFIDENCE_POLICY`), preventing hidden mutable settings from altering confidence semantics.
   6. **Statistical Calibration Transparency**:
      Explicitly flagged as `is_statistically_calibrated=False` across all domain objects and responses, avoiding pseudo-scientific probability claims.
   7. **Total Determinism & Total Order Ranking**:
-     Candidates are ranked deterministically by `(-confidence_score, -base_match_score, invoice_number, str(invoice_id))`.
+     Candidates are ranked deterministically by `(-confidence_score, -base_match_score, invoice_number, str(invoice_id))`. 100-permutation invariance verified.
   8. **Zero Financial Mutation**:
      Evaluated in-memory. Zero database mutations (`len(db.dirty) == 0`).
   9. **Tenant Isolation**:
-     Strict `company_id` enforcement across use cases and REST endpoints.
-- **Consequences**: Implementation verified with 18 automated tests (12 unit, 6 integration/security). Platform regression suite passing 559/559 tests. Status set to `IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION`.
+     Strict `company_id` enforcement across use cases and REST endpoints. Cross-tenant access fails closed with HTTP 404.
+- **Consequences**: Remediated implementation verified with 18 automated tests (12 unit, 6 integration/security). Platform regression suite passing 559/559 tests. Status set to `IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION`.
 
 
 

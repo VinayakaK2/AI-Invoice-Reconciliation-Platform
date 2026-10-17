@@ -1,31 +1,31 @@
 """Pure domain unit tests for Phase 14.12 Confidence Engine.
 
 Verifies:
-1. Base score anchoring:
-   - Initial confidence anchored to Phase 14.11 score without double counting.
-2. Direct evidence grounding:
-   - High score candidate with direct evidence correctly identifies has_direct_evidence=True.
-   - Candidate with zero direct evidence reflects has_direct_evidence=False.
-3. Conflict sensitivity & hard ceiling:
-   - Candidate or payment with active conflicting evidence incurs 50% penalty.
-   - Confidence is clamped to hard_conflict_ceiling (40.00).
-4. Multi-candidate ambiguity dampening:
-   - When multiple candidates have competing high scores within 10.00 points, confidence is dampened by 15.00 points.
-   - Ambiguity adjustment factor is recorded with competing candidate names.
-5. Qualitative confidence levels:
-   - VERY_HIGH (>= 90.00)
-   - HIGH (70.00 - 89.99)
-   - MEDIUM (40.00 - 69.99)
-   - LOW (0.01 - 39.99)
-   - NONE (0.00)
-6. Mathematical bounds & Decimal precision:
+1. Base score anchoring & anti-double counting:
+   - Confidence score anchored directly to Phase 14.11 base score.
+   - Zero invented penalties, ceilings, or arbitrary point deductions.
+2. Semantic qualitative confidence levels:
+   - VERY_HIGH: Score >= 90.00 AND direct counterparty evidence grounding present (Rule P-1).
+   - HIGH: Score >= 90.00 WITHOUT direct identifier grounding, OR 70.00 <= Score < 90.00.
+   - MEDIUM: 40.00 <= Score < 70.00.
+   - LOW: 0.00 < Score < 40.00.
+   - NONE: Score == 0.00.
+3. Factual conflict observation:
+   - Active conflicting evidence sets has_conflicting_evidence=True and records
+     CONFLICT_OBSERVED adjustment factor with delta=0.00.
+   - Zero unauthorized mathematical point penalties or artificial ceilings applied.
+4. Preserved candidate scores:
+   - Competing candidates preserve their deterministic scores without artificial dampening.
+5. Mathematical bounds & Decimal precision:
    - Confidence is strictly within [0.00, 100.00].
    - Pure Decimal arithmetic, zero float imprecision.
-7. Pure determinism & 100-permutation invariance:
+6. Pure determinism & 100-permutation invariance:
    - Repeated runs over shuffled candidate lists produce bit-for-bit identical results and ranking.
-8. Semantic honesty:
+7. Semantic honesty:
    - is_statistically_calibrated is explicitly False.
    - Zero decision fields (no AUTO_ELIGIBLE, MATCH_SUGGESTED, or allocations).
+8. Canonical, versioned, immutable policy (ConfidencePolicy, CANONICAL_CONFIDENCE_POLICY).
+9. Fail-closed tenant and payment validation.
 """
 
 from datetime import date
@@ -43,6 +43,8 @@ from app.modules.reconciliation.domain.confidence_engine import (
     ConfidenceEngineResult,
     ConfidenceFactorType,
     ConfidenceLevel,
+    ConfidencePolicy,
+    CANONICAL_CONFIDENCE_POLICY,
     DEFAULT_CONFIDENCE_CONFIG,
 )
 from app.modules.reconciliation.domain.evidence_collection import EvidenceClassification
@@ -74,6 +76,7 @@ def _make_dummy_canonical_item(
     classification: EvidenceClassification = EvidenceClassification.DIRECT,
     details: str = "Dummy evidence item",
 ) -> CanonicalEvidenceObject:
+    """Helper to construct dummy canonical evidence object."""
     return CanonicalEvidenceObject(
         evidence_type=evidence_type,
         source=source,
@@ -93,18 +96,25 @@ def _make_candidate_score(
     invoice_number: str,
     total_score: Decimal,
     has_conflict: bool = False,
+    has_direct_identifier: bool = True,
     contributions: Optional[List[ScoreContribution]] = None,
 ) -> CandidateScoreResult:
+    """Helper to construct dummy candidate score result."""
     if contributions is None:
+        signal = (
+            ScoringSignalType.IDENTIFIER_MATCH
+            if has_direct_identifier
+            else ScoringSignalType.INVOICE_NUMBER_MATCH
+        )
         contributions = [
             ScoreContribution(
-                signal_type=ScoringSignalType.IDENTIFIER_MATCH,
+                signal_type=signal,
                 weight=total_score,
                 applied=True,
                 evidence_type=NormalizedEvidenceType.BANK_ACCOUNT_IDENTIFIER,
                 source=NormalizedEvidenceSource.PAYMENT_BANK_ACCOUNT,
                 result=NormalizedEvidenceResult.MATCH,
-                reason="Direct identifier match",
+                reason="Match contribution",
                 target_entity=NormalizedTargetEntity.CUSTOMER,
             )
         ]
@@ -125,7 +135,7 @@ class TestConfidenceEngineRules:
     """Test suite for ConfidenceEngine pure domain logic."""
 
     def test_base_score_anchoring_unconflicted(self) -> None:
-        """Verify confidence is anchored to 14.11 base score when unconflicted and unambiguous."""
+        """Verify confidence is anchored directly to 14.11 base score without double counting."""
         engine = ConfidenceEngine()
         pay_id = uuid.uuid4()
         comp_id = uuid.uuid4()
@@ -135,6 +145,7 @@ class TestConfidenceEngineRules:
             invoice_id=inv_id,
             invoice_number="INV-2026-001",
             total_score=Decimal("95.00"),
+            has_direct_identifier=True,
         )
         scoring_res = MatchingScoringResult(
             payment_id=pay_id,
@@ -149,41 +160,98 @@ class TestConfidenceEngineRules:
 
         assert conf_res.total_candidates_evaluated == 1
         assessment = conf_res.candidate_assessments[0]
+        # Direct preservation of base match score:
         assert assessment.confidence_score == Decimal("95.00")
         assert assessment.confidence_level == ConfidenceLevel.VERY_HIGH
         assert assessment.base_match_score == Decimal("95.00")
+        assert assessment.has_direct_evidence is True
         assert assessment.has_conflicting_evidence is False
         assert assessment.is_statistically_calibrated is False
         assert assessment.rule_version == "1.0.0"
         assert assessment.scoring_algorithm_version == "14.11.0"
         assert assessment.confidence_algorithm_version == "14.12.0"
 
-    def test_qualitative_confidence_levels_mapping(self) -> None:
-        """Verify numeric confidence scores map to canonical ConfidenceLevel tiers."""
-        engine = ConfidenceEngine()
-        assert engine._determine_confidence_level(Decimal("100.00")) == ConfidenceLevel.VERY_HIGH
-        assert engine._determine_confidence_level(Decimal("90.00")) == ConfidenceLevel.VERY_HIGH
-        assert engine._determine_confidence_level(Decimal("89.99")) == ConfidenceLevel.HIGH
-        assert engine._determine_confidence_level(Decimal("70.00")) == ConfidenceLevel.HIGH
-        assert engine._determine_confidence_level(Decimal("69.99")) == ConfidenceLevel.MEDIUM
-        assert engine._determine_confidence_level(Decimal("40.00")) == ConfidenceLevel.MEDIUM
-        assert engine._determine_confidence_level(Decimal("39.99")) == ConfidenceLevel.LOW
-        assert engine._determine_confidence_level(Decimal("0.01")) == ConfidenceLevel.LOW
-        assert engine._determine_confidence_level(Decimal("0.00")) == ConfidenceLevel.NONE
+        # Check adjustments breakdown
+        base_factor = next(
+            f for f in assessment.adjustment_factors
+            if f.factor_type == ConfidenceFactorType.BASE_MATCH_SCORE
+        )
+        assert base_factor.delta == Decimal("0.00")
 
-    def test_conflict_penalty_and_hard_ceiling(self) -> None:
-        """Verify active conflicting evidence incurs penalty and clamps to hard ceiling (40.00)."""
+    def test_qualitative_confidence_levels_semantic_mapping(self) -> None:
+        """Verify numeric confidence scores map to canonical ConfidenceLevel tiers semantically."""
+        engine = ConfidenceEngine()
+
+        # Score >= 90.00 WITH direct evidence -> VERY_HIGH
+        assert (
+            engine._determine_confidence_level(Decimal("100.00"), has_direct_evidence=True)
+            == ConfidenceLevel.VERY_HIGH
+        )
+        assert (
+            engine._determine_confidence_level(Decimal("90.00"), has_direct_evidence=True)
+            == ConfidenceLevel.VERY_HIGH
+        )
+
+        # Score >= 90.00 WITHOUT direct evidence -> HIGH (cannot claim VERY_HIGH without Rule P-1 grounding)
+        assert (
+            engine._determine_confidence_level(Decimal("100.00"), has_direct_evidence=False)
+            == ConfidenceLevel.HIGH
+        )
+        assert (
+            engine._determine_confidence_level(Decimal("90.00"), has_direct_evidence=False)
+            == ConfidenceLevel.HIGH
+        )
+
+        # 70.00 <= Score < 90.00 -> HIGH
+        assert (
+            engine._determine_confidence_level(Decimal("89.99"), has_direct_evidence=True)
+            == ConfidenceLevel.HIGH
+        )
+        assert (
+            engine._determine_confidence_level(Decimal("70.00"), has_direct_evidence=False)
+            == ConfidenceLevel.HIGH
+        )
+
+        # 40.00 <= Score < 70.00 -> MEDIUM
+        assert (
+            engine._determine_confidence_level(Decimal("69.99"), has_direct_evidence=False)
+            == ConfidenceLevel.MEDIUM
+        )
+        assert (
+            engine._determine_confidence_level(Decimal("40.00"), has_direct_evidence=False)
+            == ConfidenceLevel.MEDIUM
+        )
+
+        # 0.00 < Score < 40.00 -> LOW
+        assert (
+            engine._determine_confidence_level(Decimal("39.99"), has_direct_evidence=False)
+            == ConfidenceLevel.LOW
+        )
+        assert (
+            engine._determine_confidence_level(Decimal("0.01"), has_direct_evidence=False)
+            == ConfidenceLevel.LOW
+        )
+
+        # Score == 0.00 -> NONE
+        assert (
+            engine._determine_confidence_level(Decimal("0.00"), has_direct_evidence=False)
+            == ConfidenceLevel.NONE
+        )
+
+    def test_conflict_surfaced_factually_without_invented_penalties(self) -> None:
+        """Verify active conflicting evidence is surfaced factually without unauthorized point deductions or ceilings."""
         engine = ConfidenceEngine()
         pay_id = uuid.uuid4()
         comp_id = uuid.uuid4()
         inv_id = uuid.uuid4()
 
-        # High base score (90.00) but has conflicting evidence
+        # High base score (90.00) with conflicting evidence
         cand_score = _make_candidate_score(
             invoice_id=inv_id,
             invoice_number="INV-CONFLICT-01",
             total_score=Decimal("90.00"),
             has_conflict=True,
+            has_direct_identifier=True,
         )
         scoring_res = MatchingScoringResult(
             payment_id=pay_id,
@@ -197,80 +265,17 @@ class TestConfidenceEngineRules:
         conf_res = engine.evaluate(scoring_result=scoring_res)
         assessment = conf_res.candidate_assessments[0]
 
-        # 90.00 - 50% = 45.00, then clamped to hard_conflict_ceiling of 40.00
-        assert assessment.confidence_score == Decimal("40.00")
-        assert assessment.confidence_level == ConfidenceLevel.MEDIUM
+        # Score remains 90.00 (not clamped to 40.00, not halved to 45.00)
+        assert assessment.confidence_score == Decimal("90.00")
         assert assessment.has_conflicting_evidence is True
-        assert any(
-            f.factor_type == ConfidenceFactorType.CONFLICT_PENALTY
-            for f in assessment.adjustment_factors
+
+        # Conflict is surfaced factually in adjustment factors with delta 0.00
+        conflict_factor = next(
+            f for f in assessment.adjustment_factors
+            if f.factor_type == ConfidenceFactorType.CONFLICT_OBSERVED
         )
-
-    def test_multi_candidate_ambiguity_dampening(self) -> None:
-        """Verify competing candidates with close high scores receive ambiguity dampening."""
-        engine = ConfidenceEngine()
-        pay_id = uuid.uuid4()
-        comp_id = uuid.uuid4()
-        inv_id_1 = uuid.uuid4()
-        inv_id_2 = uuid.uuid4()
-
-        cand_1 = _make_candidate_score(
-            invoice_id=inv_id_1,
-            invoice_number="INV-TIED-001",
-            total_score=Decimal("85.00"),
-        )
-        cand_2 = _make_candidate_score(
-            invoice_id=inv_id_2,
-            invoice_number="INV-TIED-002",
-            total_score=Decimal("80.00"),
-        )
-        scoring_res = MatchingScoringResult(
-            payment_id=pay_id,
-            company_id=comp_id,
-            candidate_scores=[cand_1, cand_2],
-            total_candidates_scored=2,
-            rule_version="1.0.0",
-            algorithm_version="14.11.0",
-        )
-
-        conf_res = engine.evaluate(scoring_result=scoring_res)
-
-        # Both candidates are >= 70.00 and within 10.00 points of each other.
-        # They should both receive the 15.00 point ambiguity deduction.
-        ass_1 = next(a for a in conf_res.candidate_assessments if a.invoice_id == inv_id_1)
-        ass_2 = next(a for a in conf_res.candidate_assessments if a.invoice_id == inv_id_2)
-
-        assert ass_1.confidence_score == Decimal("70.00")  # 85.00 - 15.00
-        assert ass_2.confidence_score == Decimal("65.00")  # 80.00 - 15.00
-        assert any(f.factor_type == ConfidenceFactorType.AMBIGUITY_DAMPENING for f in ass_1.adjustment_factors)
-        assert any(f.factor_type == ConfidenceFactorType.AMBIGUITY_DAMPENING for f in ass_2.adjustment_factors)
-
-    def test_zero_score_remains_zero_none(self) -> None:
-        """Verify candidate with 0.00 base score produces 0.00 confidence with NONE level."""
-        engine = ConfidenceEngine()
-        pay_id = uuid.uuid4()
-        comp_id = uuid.uuid4()
-        inv_id = uuid.uuid4()
-
-        cand = _make_candidate_score(
-            invoice_id=inv_id,
-            invoice_number="INV-ZERO-001",
-            total_score=Decimal("0.00"),
-            contributions=[],
-        )
-        scoring_res = MatchingScoringResult(
-            payment_id=pay_id,
-            company_id=comp_id,
-            candidate_scores=[cand],
-            total_candidates_scored=1,
-            rule_version="1.0.0",
-            algorithm_version="14.11.0",
-        )
-
-        conf_res = engine.evaluate(scoring_result=scoring_res)
-        assessment = conf_res.candidate_assessments[0]
-        assert assessment.confidence_score == Decimal("0.00")
-        assert assessment.confidence_level == ConfidenceLevel.NONE
+        assert conflict_factor.delta == Decimal("0.00")
+        assert "conflicting evidence observed" in conflict_factor.description.lower()
 
     def test_direct_evidence_grounding_flag(self) -> None:
         """Verify has_direct_evidence is true when candidate bundle has direct items."""
@@ -282,7 +287,8 @@ class TestConfidenceEngineRules:
         cand_score = _make_candidate_score(
             invoice_id=inv_id,
             invoice_number="INV-DIRECT-01",
-            total_score=Decimal("75.00"),
+            total_score=Decimal("95.00"),
+            has_direct_identifier=False,
         )
         scoring_res = MatchingScoringResult(
             payment_id=pay_id,
@@ -330,7 +336,76 @@ class TestConfidenceEngineRules:
         )
 
         conf_res = engine.evaluate(scoring_result=scoring_res, normalization_result=norm_res)
-        assert conf_res.candidate_assessments[0].has_direct_evidence is True
+        assessment = conf_res.candidate_assessments[0]
+        assert assessment.has_direct_evidence is True
+        assert assessment.confidence_level == ConfidenceLevel.VERY_HIGH
+
+    def test_competing_candidates_preserve_scores_without_dampening(self) -> None:
+        """Verify competing high-score candidates preserve their deterministic scores without arbitrary deductions."""
+        engine = ConfidenceEngine()
+        pay_id = uuid.uuid4()
+        comp_id = uuid.uuid4()
+        inv_id_1 = uuid.uuid4()
+        inv_id_2 = uuid.uuid4()
+
+        cand_1 = _make_candidate_score(
+            invoice_id=inv_id_1,
+            invoice_number="INV-TIED-001",
+            total_score=Decimal("85.00"),
+            has_direct_identifier=False,
+        )
+        cand_2 = _make_candidate_score(
+            invoice_id=inv_id_2,
+            invoice_number="INV-TIED-002",
+            total_score=Decimal("80.00"),
+            has_direct_identifier=False,
+        )
+        scoring_res = MatchingScoringResult(
+            payment_id=pay_id,
+            company_id=comp_id,
+            candidate_scores=[cand_1, cand_2],
+            total_candidates_scored=2,
+            rule_version="1.0.0",
+            algorithm_version="14.11.0",
+        )
+
+        conf_res = engine.evaluate(scoring_result=scoring_res)
+
+        ass_1 = next(a for a in conf_res.candidate_assessments if a.invoice_id == inv_id_1)
+        ass_2 = next(a for a in conf_res.candidate_assessments if a.invoice_id == inv_id_2)
+
+        # Exact scores preserved without 15 point deduction
+        assert ass_1.confidence_score == Decimal("85.00")
+        assert ass_2.confidence_score == Decimal("80.00")
+        assert ass_1.confidence_level == ConfidenceLevel.HIGH
+        assert ass_2.confidence_level == ConfidenceLevel.HIGH
+
+    def test_zero_score_remains_zero_none(self) -> None:
+        """Verify candidate with 0.00 base score produces 0.00 confidence with NONE level."""
+        engine = ConfidenceEngine()
+        pay_id = uuid.uuid4()
+        comp_id = uuid.uuid4()
+        inv_id = uuid.uuid4()
+
+        cand = _make_candidate_score(
+            invoice_id=inv_id,
+            invoice_number="INV-ZERO-001",
+            total_score=Decimal("0.00"),
+            contributions=[],
+        )
+        scoring_res = MatchingScoringResult(
+            payment_id=pay_id,
+            company_id=comp_id,
+            candidate_scores=[cand],
+            total_candidates_scored=1,
+            rule_version="1.0.0",
+            algorithm_version="14.11.0",
+        )
+
+        conf_res = engine.evaluate(scoring_result=scoring_res)
+        assessment = conf_res.candidate_assessments[0]
+        assert assessment.confidence_score == Decimal("0.00")
+        assert assessment.confidence_level == ConfidenceLevel.NONE
 
     def test_100_run_permutation_determinism(self) -> None:
         """Verify bit-for-bit permutation invariance across 100 shuffled candidate lists."""
@@ -411,25 +486,30 @@ class TestConfidenceEngineRules:
         with pytest.raises(DomainError, match="Mismatched payment_id"):
             engine.evaluate(scoring_result=scoring_res, normalization_result=norm_res)
 
-    def test_custom_confidence_config_thresholds(self) -> None:
-        """Verify custom ConfidenceConfig can adjust levels and thresholds deterministically."""
-        custom_config = ConfidenceConfig(
+    def test_custom_confidence_policy_thresholds(self) -> None:
+        """Verify custom ConfidencePolicy can adjust levels and thresholds deterministically."""
+        custom_policy = ConfidencePolicy(
             very_high_threshold=Decimal("95.00"),
             high_threshold=Decimal("80.00"),
             medium_threshold=Decimal("50.00"),
-            hard_conflict_ceiling=Decimal("30.00"),
         )
-        engine = ConfidenceEngine(config=custom_config)
-        assert engine._determine_confidence_level(Decimal("94.00")) == ConfidenceLevel.HIGH
-        assert engine._determine_confidence_level(Decimal("95.00")) == ConfidenceLevel.VERY_HIGH
+        engine = ConfidenceEngine(policy=custom_policy)
+        assert (
+            engine._determine_confidence_level(Decimal("94.00"), has_direct_evidence=True)
+            == ConfidenceLevel.HIGH
+        )
+        assert (
+            engine._determine_confidence_level(Decimal("95.00"), has_direct_evidence=True)
+            == ConfidenceLevel.VERY_HIGH
+        )
 
-    def test_invalid_config_threshold_ordering_raises_domain_error(self) -> None:
+    def test_invalid_policy_threshold_ordering_raises_domain_error(self) -> None:
         """Verify invalid threshold ordering fails closed at configuration instantiation."""
         with pytest.raises(DomainError, match="very_high_threshold must be strictly greater"):
-            ConfidenceConfig(very_high_threshold=Decimal("70.00"), high_threshold=Decimal("80.00"))
+            ConfidencePolicy(very_high_threshold=Decimal("70.00"), high_threshold=Decimal("80.00"))
 
         with pytest.raises(DomainError, match="high_threshold must be strictly greater"):
-            ConfidenceConfig(high_threshold=Decimal("40.00"), medium_threshold=Decimal("50.00"))
+            ConfidencePolicy(high_threshold=Decimal("40.00"), medium_threshold=Decimal("50.00"))
 
     def test_deterministic_ranking_order_ties(self) -> None:
         """Verify ties in confidence score are deterministically broken by base_match_score, then invoice_number, then invoice_id."""

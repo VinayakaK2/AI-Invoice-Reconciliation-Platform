@@ -180,6 +180,8 @@ __all__ = [
     "ConfidenceAdjustmentFactor",
     "ConfidenceConfig",
     "DEFAULT_CONFIDENCE_CONFIG",
+    "ConfidencePolicy",
+    "CANONICAL_CONFIDENCE_POLICY",
     "CandidateConfidenceAssessment",
     "ConfidenceEngineResult",
     "ConfidenceEngine",
@@ -192,6 +194,8 @@ from app.modules.reconciliation.domain.confidence_engine import (
     ConfidenceEngineResult,
     ConfidenceFactorType,
     ConfidenceLevel,
+    ConfidencePolicy,
     DEFAULT_CONFIDENCE_CONFIG,
+    CANONICAL_CONFIDENCE_POLICY,
 )
 

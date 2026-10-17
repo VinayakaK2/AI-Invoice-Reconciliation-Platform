@@ -1,9 +1,8 @@
-"""Domain entities, value objects, confidence configuration, and deterministic engine for Phase 14.12 Confidence Engine.
+"""Domain entities, value objects, canonical policy, and deterministic engine for Phase 14.12 Confidence Engine.
 
-Phase 14.12 establishes a deterministic confidence assessment layer that consumes
-upstream Phase 14.11 MatchingScoringResult and Phase 14.10 EvidenceNormalizationResult
-and produces a canonical, explainable confidence evaluation (0.00 to 100.00) for each
-reconciliation candidate.
+Phase 14.12 establishes an objective, bounded, deterministic confidence assessment layer that consumes
+upstream Phase 14.11 MatchingScoringResult and Phase 14.10 EvidenceNormalizationResult and produces
+a canonical confidence evaluation (0.00 to 100.00) for each reconciliation candidate.
 
 CRITICAL DOMAIN INVARIANTS:
 1. Separation of Concerns:
@@ -15,22 +14,14 @@ CRITICAL DOMAIN INVARIANTS:
 4. Pure Determinism: 100% deterministic, zero LLM authority, zero randomness, zero floating-point math.
    Uses exact Python Decimal for all calculations.
 5. Mathematical Bounds: 0.00 <= confidence_score <= 100.00.
-6. Canonical Scale: Exactly one authoritative scale: Decimal("0.00") to Decimal("100.00").
-   Qualitative tiers:
-     - VERY_HIGH: >= 90.00
-     - HIGH:      70.00 - 89.99
-     - MEDIUM:    40.00 - 69.99
-     - LOW:       0.01 - 39.99
-     - NONE:      0.00
-7. Anti-Double Counting: Base score from Phase 14.11 is preserved. Confidence assessment
-   evaluates evidence strength, direct evidence presence, conflict penalties, and multi-candidate
-   ambiguity. It does NOT recompute or double-award base signal weights.
-8. Conflict Integrity: Active conflicting evidence enforces severe deterministic dampening
-   (penalized or clamped), preventing unconflicted confidence when contradictions exist.
-9. Missing Evidence: Missing evidence awards 0 points; absence of evidence is not penalized
-   as contradiction unless conflicting signals are present.
-10. Versioning & Provenance: Every assessment records rule_version ("1.0.0"), scoring_algorithm_version,
-    and confidence_algorithm_version ("14.12.0").
+6. Anti-Double Counting: Base score from Phase 14.11 represents the aggregated evidence weight.
+   Phase 14.12 does NOT recompute or double-award base signal weights.
+7. Semantic Honesty & Direct Grounding:
+   - Direct evidence presence is surfaced factually (e.g. Rule P-1 bank account / UPI VPA match).
+   - Conflicting evidence presence is surfaced factually from upstream normalizer & scoring.
+   - Zero invented penalties, ceilings, or dampening formulas.
+8. Versioning & Provenance: Every assessment records rule_version ("1.0.0"), scoring_algorithm_version,
+   and confidence_algorithm_version ("14.12.0").
 """
 
 from dataclasses import dataclass, field
@@ -40,13 +31,9 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from app.modules.reconciliation.domain.evidence_collection import EvidenceClassification
 from app.modules.reconciliation.domain.evidence_normalization import (
-    CanonicalEvidenceObject,
     EvidenceNormalizationResult,
     NormalizedCandidateBundle,
-    NormalizedEvidenceResult,
-    NormalizedEvidenceType,
     NormalizedPaymentEvidenceContext,
 )
 from app.modules.reconciliation.domain.matching_scoring import (
@@ -63,35 +50,39 @@ from app.shared.exceptions import DomainError
 
 
 class ConfidenceLevel(str, Enum):
-    """Canonical qualitative confidence bands grounded in business rule thresholds."""
+    """Canonical qualitative confidence rating for evidence support.
+    
+    Semantic Meaning:
+    - VERY_HIGH: Deterministic direct counterparty identifier match (Rule P-1).
+    - HIGH:      Strong candidate support without direct identifier (e.g. invoice reference + exact amount).
+    - MEDIUM:    Moderate evidence support (e.g. exact amount or name match only).
+    - LOW:       Weak circumstantial support.
+    - NONE:      Zero match score or absent supporting evidence.
+    """
 
-    VERY_HIGH = "VERY_HIGH"  # Score >= 90.00 (aligns with Rule 2.5 AUTO_ELIGIBLE threshold preconditions)
-    HIGH = "HIGH"            # Score 70.00 - 89.99 (aligns with Rule 2.5 MATCH_SUGGESTED threshold)
-    MEDIUM = "MEDIUM"        # Score 40.00 - 69.99 (partial / moderate signal support)
-    LOW = "LOW"              # Score 0.01 - 39.99 (weak / circumstantial support)
-    NONE = "NONE"            # Score 0.00 (no supporting evidence or complete suppression)
+    VERY_HIGH = "VERY_HIGH"
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    NONE = "NONE"
 
 
 class ConfidenceFactorType(str, Enum):
     """Traceable rationale factor categories contributing to the confidence assessment."""
 
-    BASE_MATCH_SCORE = "BASE_MATCH_SCORE"                    # Preserved Phase 14.11 score contribution
-    DIRECT_IDENTIFIER_BOOST = "DIRECT_IDENTIFIER_BOOST"      # Direct account/UPI coordinate confirmation
-    INVOICE_NUMBER_CONFIRMATION = "INVOICE_NUMBER_CONFIRMATION"  # Explicit invoice reference provenance match
-    AMOUNT_CONSERVATION = "AMOUNT_CONSERVATION"              # Exact financial amount equality
-    CONFLICT_PENALTY = "CONFLICT_PENALTY"                    # Active contradictory evidence penalty
-    AMBIGUITY_DAMPENING = "AMBIGUITY_DAMPENING"              # Multiple competing candidates dampening
-    MISSING_ESSENTIAL_PENALTY = "MISSING_ESSENTIAL_PENALTY"  # Absence of key identifiers in high-score claim
+    BASE_MATCH_SCORE = "BASE_MATCH_SCORE"
+    DIRECT_IDENTIFIER_GROUNDING = "DIRECT_IDENTIFIER_GROUNDING"
+    CONFLICT_OBSERVED = "CONFLICT_OBSERVED"
 
 
 # ==============================================================================
-# Value Objects & Configuration
+# Value Objects & Canonical Policy
 # ==============================================================================
 
 
 @dataclass(frozen=True)
 class ConfidenceAdjustmentFactor:
-    """Explainable factor documenting how confidence was calibrated from base score."""
+    """Explainable factor documenting confidence assessment rationale and provenance."""
 
     factor_type: ConfidenceFactorType
     delta: Decimal
@@ -110,27 +101,19 @@ class ConfidenceAdjustmentFactor:
 
 
 @dataclass(frozen=True)
-class ConfidenceConfig:
-    """Authoritative deterministic confidence calibration configuration.
+class ConfidencePolicy:
+    """Canonical versioned policy for the Phase 14.12 Confidence Engine.
 
     Guarantees:
     - Pure Decimal precision.
     - Zero probability claims (is_statistically_calibrated = False).
+    - Immutable, canonical defaults. No hidden arbitrary penalties or dampening.
     """
 
-    # Maximum confidence score
     max_confidence: Decimal = Decimal("100.00")
     min_confidence: Decimal = Decimal("0.00")
 
-    # Conflict penalty: severe dampening if candidate has conflicting evidence
-    conflict_penalty_pct: Decimal = Decimal("0.50")  # Reduces score by 50% if unsuppressed conflict remains
-    hard_conflict_ceiling: Decimal = Decimal("40.00")  # Clamps maximum confidence to 40.00 if conflict exists
-
-    # Ambiguity dampening: applied when another candidate has a tied or near-tied high score
-    ambiguity_delta_threshold: Decimal = Decimal("10.00")  # Candidates within 10 points are considered competing
-    ambiguity_penalty: Decimal = Decimal("15.00")          # Deducts 15 points if multiple close candidates exist
-
-    # Level thresholds
+    # Authoritative qualitative rating score boundaries
     very_high_threshold: Decimal = Decimal("90.00")
     high_threshold: Decimal = Decimal("70.00")
     medium_threshold: Decimal = Decimal("40.00")
@@ -149,7 +132,12 @@ class ConfidenceConfig:
             raise DomainError("high_threshold must be strictly greater than medium_threshold.")
 
 
-DEFAULT_CONFIDENCE_CONFIG = ConfidenceConfig()
+# Authoritative canonical policy instance
+CANONICAL_CONFIDENCE_POLICY = ConfidencePolicy()
+
+# Backwards-compatible aliases for legacy imports
+ConfidenceConfig = ConfidencePolicy
+DEFAULT_CONFIDENCE_CONFIG = CANONICAL_CONFIDENCE_POLICY
 
 
 # ==============================================================================
@@ -263,11 +251,10 @@ class ConfidenceEngine:
     1. Deterministic Calculation: Bit-for-bit identical outcomes across repeated executions.
     2. Zero Probability Claims: Produces a deterministic confidence score [0.00, 100.00];
        explicitly flags is_statistically_calibrated=False.
-    3. Anti-Double Counting: Uses Phase 14.11 total_score as the baseline; evaluates
-       evidence veracity, direct evidence grounding, conflict dampening, and multi-candidate
-       competing ambiguity without recalculating base signal weights.
-    4. Conflict Sensitivity: If active unsuppressed conflicts exist, penalizes and caps
-       the confidence score to prevent false certainty.
+    3. Anti-Double Counting: Preserves Phase 14.11 total_score directly; does NOT invent
+       or apply unauthorized mathematical penalties, ceilings, or dampening formulas.
+    4. Direct Evidence Grounding: Factually determines presence of direct counterparty
+       evidence (Rule P-1).
     5. Non-Decision: Evaluates confidence only; never outputs AUTO_ELIGIBLE, MATCH_SUGGESTED,
        or financial allocations (deferred strictly to Phase 14.13).
     6. Zero Financial Mutation: 100% in-memory read-only evaluation.
@@ -275,20 +262,40 @@ class ConfidenceEngine:
 
     def __init__(
         self,
-        config: ConfidenceConfig = DEFAULT_CONFIDENCE_CONFIG,
+        policy: ConfidencePolicy = CANONICAL_CONFIDENCE_POLICY,
+        config: Optional[ConfidencePolicy] = None,
     ) -> None:
-        self.config = config
+        self.policy = config if config is not None else policy
 
-    def _determine_confidence_level(self, score: Decimal) -> ConfidenceLevel:
-        """Derive qualitative confidence level from numeric score."""
-        if score >= self.config.very_high_threshold:
-            return ConfidenceLevel.VERY_HIGH
-        if score >= self.config.high_threshold:
+    def _determine_confidence_level(
+        self,
+        score: Decimal,
+        has_direct_evidence: bool,
+    ) -> ConfidenceLevel:
+        """Derive qualitative confidence level from numeric score and direct evidence grounding.
+        
+        Authoritative mapping:
+        - VERY_HIGH: Score >= 90.00 AND direct identifier evidence present (Rule P-1).
+        - HIGH:      Score >= 70.00 (strong evidence support).
+        - MEDIUM:    Score >= 40.00 (moderate evidence support).
+        - LOW:       Score > 0.00 (weak circumstantial support).
+        - NONE:      Score == 0.00 (no supporting evidence).
+        """
+        if score >= self.policy.very_high_threshold:
+            # VERY_HIGH strictly requires direct counterparty evidence grounding
+            if has_direct_evidence:
+                return ConfidenceLevel.VERY_HIGH
             return ConfidenceLevel.HIGH
-        if score >= self.config.medium_threshold:
+
+        if score >= self.policy.high_threshold:
+            return ConfidenceLevel.HIGH
+
+        if score >= self.policy.medium_threshold:
             return ConfidenceLevel.MEDIUM
+
         if score > Decimal("0.00"):
             return ConfidenceLevel.LOW
+
         return ConfidenceLevel.NONE
 
     def assess_candidate(
@@ -296,7 +303,6 @@ class ConfidenceEngine:
         candidate_score: CandidateScoreResult,
         bundle: Optional[NormalizedCandidateBundle],
         payment_evidence: NormalizedPaymentEvidenceContext,
-        all_candidate_scores: List[CandidateScoreResult],
     ) -> CandidateConfidenceAssessment:
         """Assess confidence for a single candidate invoice.
 
@@ -304,90 +310,61 @@ class ConfidenceEngine:
         - candidate_score: Evaluated Phase 14.11 score for this candidate.
         - bundle: Corresponding Phase 14.10 normalized candidate bundle (optional for robustness).
         - payment_evidence: Payment-level normalized evidence context.
-        - all_candidate_scores: All candidate scores for this payment (used for ambiguity detection).
         """
         base_score = candidate_score.total_score
         adjustments: List[ConfidenceAdjustmentFactor] = []
 
-        # 1. Base Score Anchor
+        # 1. Base Score Anchor (Preserves Phase 14.11 score without double counting)
         adjustments.append(
             ConfidenceAdjustmentFactor(
                 factor_type=ConfidenceFactorType.BASE_MATCH_SCORE,
-                delta=base_score,
-                description=f"Initial confidence anchored to Phase 14.11 match score ({base_score:.2f})",
+                delta=Decimal("0.00"),
+                description=f"Confidence anchored to deterministic Phase 14.11 match score ({base_score:.2f})",
             )
         )
 
-        current_score = base_score
-
-        # 2. Direct Evidence Grounding Check
+        # 2. Direct Evidence Grounding Check (e.g. Rule P-1 Bank Account or UPI VPA)
         has_direct = False
         if bundle is not None:
             has_direct = bundle.direct_evidence_count > 0
         else:
-            # Fallback to inspecting applied score contributions
             has_direct = any(
-                c.applied and c.signal_type in (ScoringSignalType.IDENTIFIER_MATCH, ScoringSignalType.INVOICE_NUMBER_MATCH, ScoringSignalType.AMOUNT_EXACT_MATCH)
+                c.applied and c.signal_type == ScoringSignalType.IDENTIFIER_MATCH
                 for c in candidate_score.contributions
             )
 
-        # 3. Conflict Penalty Evaluation
+        if has_direct:
+            adjustments.append(
+                ConfidenceAdjustmentFactor(
+                    factor_type=ConfidenceFactorType.DIRECT_IDENTIFIER_GROUNDING,
+                    delta=Decimal("0.00"),
+                    description="Direct counterparty identifier verified (Rule P-1)",
+                )
+            )
+
+        # 3. Conflict Observation (Factually surfaced without inventing unauthorized penalties)
         has_conflict = candidate_score.has_conflicting_evidence or payment_evidence.has_conflicting_identifiers
         if bundle is not None and bundle.has_conflicting_evidence:
             has_conflict = True
 
         if has_conflict:
-            # Apply proportional penalty and clamp to hard ceiling
-            conflict_deduction = (current_score * self.config.conflict_penalty_pct).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            current_score = max(Decimal("0.00"), current_score - conflict_deduction)
             adjustments.append(
                 ConfidenceAdjustmentFactor(
-                    factor_type=ConfidenceFactorType.CONFLICT_PENALTY,
-                    delta=-conflict_deduction,
-                    description=f"Active conflicting evidence reduced confidence by {self.config.conflict_penalty_pct * 100:.0f}%",
+                    factor_type=ConfidenceFactorType.CONFLICT_OBSERVED,
+                    delta=Decimal("0.00"),
+                    description="Contradictory or conflicting evidence observed in candidate bundle",
                 )
             )
 
-            if current_score > self.config.hard_conflict_ceiling:
-                ceiling_deduction = current_score - self.config.hard_conflict_ceiling
-                current_score = self.config.hard_conflict_ceiling
-                adjustments.append(
-                    ConfidenceAdjustmentFactor(
-                        factor_type=ConfidenceFactorType.CONFLICT_PENALTY,
-                        delta=-ceiling_deduction,
-                        description=f"Confidence clamped to hard ceiling ({self.config.hard_conflict_ceiling:.2f}) due to active conflict",
-                    )
-                )
-
-        # 4. Multi-Candidate Ambiguity Dampening Check
-        # If there are competing candidates with close high scores (within ambiguity_delta_threshold),
-        # confidence in any single candidate is diminished.
-        if len(all_candidate_scores) > 1 and current_score > Decimal("0.00"):
-            competing_candidates = [
-                cs for cs in all_candidate_scores
-                if cs.invoice_id != candidate_score.invoice_id
-                and cs.total_score >= self.config.high_threshold
-                and abs(cs.total_score - base_score) <= self.config.ambiguity_delta_threshold
-            ]
-            if competing_candidates:
-                ambiguity_deduction = min(current_score, self.config.ambiguity_penalty)
-                current_score -= ambiguity_deduction
-                competing_inv_nums = ", ".join(f"'{c.invoice_number}'" for c in competing_candidates[:3])
-                adjustments.append(
-                    ConfidenceAdjustmentFactor(
-                        factor_type=ConfidenceFactorType.AMBIGUITY_DAMPENING,
-                        delta=-ambiguity_deduction,
-                        description=f"Confidence dampened by competing candidate(s) {competing_inv_nums} within {self.config.ambiguity_delta_threshold:.2f} points",
-                    )
-                )
-
-        # 5. Final Mathematical Clamping to [0.00, 100.00]
-        final_confidence = min(self.config.max_confidence, max(self.config.min_confidence, current_score))
+        # 4. Final Mathematical Score (Exact Decimal, bounded to [0.00, 100.00])
+        final_confidence = min(self.policy.max_confidence, max(self.policy.min_confidence, base_score))
         final_confidence = final_confidence.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        confidence_level = self._determine_confidence_level(final_confidence)
+        # 5. Qualitative Rating Assignment
+        confidence_level = self._determine_confidence_level(
+            score=final_confidence,
+            has_direct_evidence=has_direct,
+        )
 
         return CandidateConfidenceAssessment(
             invoice_id=candidate_score.invoice_id,
@@ -398,9 +375,9 @@ class ConfidenceEngine:
             has_direct_evidence=has_direct,
             has_conflicting_evidence=has_conflict,
             adjustment_factors=adjustments,
-            rule_version=self.config.rule_version,
+            rule_version=self.policy.rule_version,
             scoring_algorithm_version=candidate_score.algorithm_version,
-            confidence_algorithm_version=self.config.algorithm_version,
+            confidence_algorithm_version=self.policy.algorithm_version,
             is_statistically_calibrated=False,
         )
 
@@ -416,7 +393,6 @@ class ConfidenceEngine:
         - Preserves Candidate order: sorted by (-confidence_score, -base_match_score, invoice_number, str(invoice_id)).
         - Zero financial state mutation.
         """
-        # Map bundle by invoice_id if normalization_result provided
         bundles_by_id: Dict[UUID, NormalizedCandidateBundle] = {}
         payment_evidence = None
 
@@ -435,7 +411,6 @@ class ConfidenceEngine:
                 bundles_by_id[b.invoice_id] = b
             payment_evidence = normalization_result.payment_evidence
 
-        # Create dummy payment evidence if none provided
         if payment_evidence is None:
             payment_evidence = NormalizedPaymentEvidenceContext(
                 payment_id=scoring_result.payment_id,
@@ -452,7 +427,6 @@ class ConfidenceEngine:
                 candidate_score=cand_score,
                 bundle=bundle,
                 payment_evidence=payment_evidence,
-                all_candidate_scores=scoring_result.candidate_scores,
             )
             assessments.append(assessment)
 
@@ -473,9 +447,9 @@ class ConfidenceEngine:
             company_id=scoring_result.company_id,
             candidate_assessments=assessments,
             total_candidates_evaluated=len(assessments),
-            rule_version=self.config.rule_version,
+            rule_version=self.policy.rule_version,
             scoring_algorithm_version=scoring_result.algorithm_version,
-            confidence_algorithm_version=self.config.algorithm_version,
+            confidence_algorithm_version=self.policy.algorithm_version,
             is_deterministic=True,
             is_statistically_calibrated=False,
         )

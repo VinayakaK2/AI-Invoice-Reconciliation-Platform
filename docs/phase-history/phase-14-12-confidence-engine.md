@@ -14,31 +14,32 @@ $$\text{Evidence} \neq \text{Scoring} \neq \text{Confidence} \neq \text{Decision
 The Confidence Engine takes the already-established candidate scores from Phase 14.11 (`MatchingScoringResult`) and the canonical normalized evidence from Phase 14.10 (`EvidenceNormalizationResult`), and computes an objective, reproducible confidence assessment $[0.00, 100.00]$ along with an explainable qualitative rating (`ConfidenceLevel`) and transparent adjustment factors (`ConfidenceAdjustmentFactor`).
 
 ### Invariant & Boundary Guarantees
-1. **Confidence is Aggregation & Dampening, NOT a Financial Decision**: The Confidence Engine does NOT recommend `AUTO_ELIGIBLE` or `MATCH_SUGGESTED`, does NOT route to human review, and does NOT generate decision objects (these belong strictly to Phase 14.13).
+1. **Confidence is Aggregation & Evaluation, NOT a Financial Decision**: The Confidence Engine does NOT recommend `AUTO_ELIGIBLE` or `MATCH_SUGGESTED`, does NOT route to human review, and does NOT generate decision objects (these belong strictly to Phase 14.13).
 2. **Observed Financial Mutation: NONE**:
    - Database writes: **0**
    - Session mutations: `len(db.dirty) == 0`, `len(db.new) == 0`, `len(db.deleted) == 0`
    - Invoice / Payment status transitions: **NONE**
-3. **Deterministic Anchoring**: Unconflicted candidates retain their exact Phase 14.11 base score.
-4. **No Double Counting**: Base evidence weights (invoice reference, amount match, bank account, date proximity) were scored in Phase 14.11 and are NOT re-added in Phase 14.12.
-5. **Conflict Suppression & Hard Ceiling**: Any candidate associated with active conflicting evidence incurs a 50% deduction and is clamped to a hard ceiling of $40.00$, preventing high-confidence classification.
-6. **Multi-Candidate Ambiguity Dampening**: When competing candidates exhibit near-equal base scores ($\Delta \le 10.00$), a -15.00 point ambiguity penalty is deterministically deducted to reflect candidate ambiguity.
+3. **Deterministic Anchoring & Anti-Double Counting**: Candidates anchor directly to their exact Phase 14.11 base match score ($\Delta = 0.00$). Base evidence weights (invoice reference, amount match, bank account, date proximity) are NOT re-added or double-counted.
+4. **Zero Invented Penalties, Ceilings, or Deductions**: Remediation removed unauthorized 50% conflict deductions, 40.00 conflict ceilings, and 15.00 point ambiguity penalties.
+5. **Factual Conflict Observation**: Conflicting evidence is surfaced factually (`has_conflicting_evidence = True`, `ConfidenceFactorType.CONFLICT_OBSERVED`, $\Delta = 0.00$) rather than applying synthetic score subtractions.
+6. **Direct Grounding Requirement**: `VERY_HIGH` strictly requires direct counterparty identifier match (Rule P-1 Bank Account or UPI VPA match). High scoring candidates without direct identifier evaluate to `HIGH`.
 7. **Empirical Calibration Boundary**: Confidence scores are explicitly marked `is_statistically_calibrated=False`, preventing misleading claims of Bayesian or ML posterior probability.
-8. **Pure Decimal Arithmetic**: All computations use `Decimal` with `ROUND_HALF_UP` to two decimal places, avoiding binary floating-point rounding errors.
+8. **Pure Decimal Arithmetic**: All computations use `Decimal` with `ROUND_HALF_UP` bounded to $[0.00, 100.00]$, avoiding binary floating-point rounding errors.
+9. **Canonical Versioned Policy**: Formalized as `ConfidencePolicy` (`CANONICAL_CONFIDENCE_POLICY`).
 
 ---
 
 ## 2. Confidence Level Mapping
 
-The qualitative mapping is strictly bounded:
+The qualitative mapping is strictly bounded and semantic:
 
-| Qualitative Level | Score Range | Description |
-|---|---|---|
-| `VERY_HIGH` | $[90.00, 100.00]$ | Deterministic direct evidence present, exact amount match, unconflicted. |
-| `HIGH` | $[70.00, 89.99]$ | Strong supporting evidence, zero conflicting signals. |
-| `MEDIUM` | $[40.00, 69.99]$ | Moderate supporting signals or multi-candidate competition. |
-| `LOW` | $[0.01, 39.99]$ | Weak evidence or suppressed by active conflict penalty ceiling. |
-| `NONE` | $0.00$ | No matching signals or zero base score. |
+| Qualitative Level | Score Range | Direct Evidence Grounding Required? | Description |
+|---|---|---|---|
+| `VERY_HIGH` | $[90.00, 100.00]$ | **YES** (Rule P-1) | Direct counterparty identifier verified (Bank Account / UPI VPA) with strong aggregate support. |
+| `HIGH` | $[70.00, 100.00]$ | NO | Strong supporting evidence (e.g. invoice reference + exact amount) or high score without direct identifier grounding. |
+| `MEDIUM` | $[40.00, 69.99]$ | NO | Moderate supporting evidence (e.g. exact amount or customer name match). |
+| `LOW` | $[0.01, 39.99]$ | NO | Weak circumstantial evidence. |
+| `NONE` | $0.00$ | NO | No matching signals or zero base score. |
 
 ---
 
@@ -58,9 +59,9 @@ backend/app/modules/reconciliation/
 
 ### Domain Models (`confidence_engine.py`)
 - `ConfidenceLevel`: Enum (`VERY_HIGH`, `HIGH`, `MEDIUM`, `LOW`, `NONE`).
-- `ConfidenceFactorType`: Enum identifying exact reasons for confidence adjustments (`BASE_MATCH_SCORE_ANCHOR`, `CONFLICT_PENALTY`, `HARD_CONFLICT_CEILING_ENFORCED`, `MULTI_CANDIDATE_AMBIGUITY_DAMPENING`, `SCORE_BOUNDS_CLAMPING`).
-- `ConfidenceAdjustmentFactor`: Transparent explanation DTO with `factor_type`, `points_delta`, and `description`.
-- `ConfidenceConfig`: Immutable threshold configuration with fail-closed validation.
+- `ConfidenceFactorType`: Enum identifying exact reasons for confidence adjustments (`BASE_MATCH_SCORE`, `DIRECT_IDENTIFIER_GROUNDING`, `CONFLICT_OBSERVED`).
+- `ConfidenceAdjustmentFactor`: Transparent explanation DTO with `factor_type`, `delta`, and `description`.
+- `ConfidencePolicy`: Canonical immutable threshold configuration (`CANONICAL_CONFIDENCE_POLICY`) with fail-closed validation.
 - `CandidateConfidenceAssessment`: Evaluated candidate with `invoice_id`, `invoice_number`, `base_match_score`, `confidence_score`, `confidence_level`, `has_direct_evidence`, `has_conflicting_evidence`, `is_statistically_calibrated=False`, and adjustment audit trail.
 - `ConfidenceEngineResult`: Container for all evaluated candidates, sorted deterministically by `(-confidence_score, -base_match_score, invoice_number, str(invoice_id))`.
 
@@ -80,15 +81,15 @@ platform win32 -- Python 3.11.8, pytest-9.1.1, pluggy-1.6.0
 collected 18 items
 
 tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_base_score_anchoring_unconflicted PASSED [  5%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_qualitative_confidence_levels_mapping PASSED [ 11%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_conflict_penalty_and_hard_ceiling PASSED [ 16%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_multi_candidate_ambiguity_dampening PASSED [ 22%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_zero_score_remains_zero_none PASSED [ 27%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_direct_evidence_grounding_flag PASSED [ 33%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_qualitative_confidence_levels_semantic_mapping PASSED [ 11%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_conflict_surfaced_factually_without_invented_penalties PASSED [ 16%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_direct_evidence_grounding_flag PASSED [ 22%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_competing_candidates_preserve_scores_without_dampening PASSED [ 27%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_zero_score_remains_zero_none PASSED [ 33%]
 tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_100_run_permutation_determinism PASSED [ 38%]
 tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_adversarial_mismatched_payment_tenant_id_fails_closed PASSED [ 44%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_custom_confidence_config_thresholds PASSED [ 50%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_invalid_config_threshold_ordering_raises_domain_error PASSED [ 55%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_custom_confidence_policy_thresholds PASSED [ 50%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_invalid_policy_threshold_ordering_raises_domain_error PASSED [ 55%]
 tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_deterministic_ranking_order_ties PASSED [ 61%]
 tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_out_of_bounds_confidence_score_raises_domain_error PASSED [ 66%]
 tests/integration/test_confidence_engine_api.py::test_confidence_api_e2e PASSED [ 72%]
@@ -98,7 +99,7 @@ tests/integration/test_confidence_engine_api.py::test_confidence_cross_tenant_cu
 tests/integration/test_confidence_engine_api.py::test_confidence_unauthenticated_rejected PASSED [ 94%]
 tests/integration/test_confidence_engine_api.py::test_batch_confidence_endpoint PASSED [100%]
 
-============================= 18 passed in 3.02s ==============================
+============================= 18 passed in 3.62s ==============================
 ```
 
 ### Full Platform Regression Suite Output
