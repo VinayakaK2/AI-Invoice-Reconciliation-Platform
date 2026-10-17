@@ -229,10 +229,23 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 - [x] 22 automated tests passing (16 unit, 6 integration), 541 platform regression suite passing (0 failures, 105.89s runtime on `main`)
 - [x] Merged to `main` via PR #9, PR #10, and PR #11; Phase 14.11 freeze certified (`docs/phase-history/phase-14-11-matching-scoring.md`)
 
+### Phase 14.12 — Reconciliation Engine: Confidence Engine [FROZEN]
+- [x] Domain layer: `ConfidenceEngine`, `ConfidencePolicy` (`CANONICAL_CONFIDENCE_POLICY`), `ConfidenceLevel` (`VERY_HIGH`, `HIGH`, `MEDIUM`, `LOW`, `NONE`), `ConfidenceFactorType`, `ConfidenceAdjustmentFactor`, `CandidateConfidenceAssessment`, `ConfidenceEngineResult`
+- [x] Canonical deterministic contract: `confidence_score == match_score` (anchored to Phase 14.11 base match score, $\Delta = 0.00$, bounded to $[0.00, 100.00]$ using exact Decimal arithmetic)
+- [x] Pure presentation bands: `VERY_HIGH` (90–100), `HIGH` (70–89), `MEDIUM` (40–69), `LOW` (1–39), `NONE` (0)
+- [x] Decoupled `VERY_HIGH` classification: `VERY_HIGH` does NOT require direct counterparty identifier grounding (Rule P-1). Direct identifier grounding is a separate Phase 14.13 safety precondition for `AUTO_ELIGIBLE`
+- [x] Anti-penalty & anti-bonus invariants: zero conflict deductions, zero ceilings, zero ambiguity deductions, zero synthetic points
+- [x] Factual evidence transparency: surfaces `direct_evidence_present`, `conflicting_evidence_present`, and `incomplete_evidence_present` factually
+- [x] Required output schema aliases: `candidate_id`, `payment_id`, `match_score`, `confidence_score`, `confidence_level`, `direct_evidence_present`, `conflicting_evidence_present`, `incomplete_evidence_present`, `algorithm_version`, `is_statistically_calibrated=False`
+- [x] Absolute zero financial state mutation guarantee: 100% in-memory read-only evaluation verified with `len(db.dirty) == 0`
+- [x] Application & REST API layer: `ConfidenceAssessmentUseCase` and `BatchConfidenceAssessmentUseCase`, `POST /api/v1/reconciliation/confidence/{payment_id}` and `POST /api/v1/reconciliation/confidence-batch` with JWT auth and fail-closed tenant scoping
+- [x] 32 automated tests passing (24 unit, 8 integration/security), 573 full platform regression suite passing (100% green, 0 failures, 181.41s runtime)
+- [x] Merged to `main` via PR #13 and PR #14; Phase 14.12 certified and FROZEN (`docs/phase-history/phase-14-12-confidence-engine.md`)
+
 ---
 
 ## Disambiguation Rules:
-1. **Reconciliation Engine Sub-Phases**: Phase 14.1 (Payment Intake), Phase 14.2 (Payer Identification), Phase 14.3 (Candidate Invoice Generation), Phase 14.4 (Candidate Filtering), Phase 14.5 (Exact Matching), Phase 14.6 (Partial Matching), Phase 14.7 (Multi-Invoice Matching), Phase 14.8 (Combination Matching), Phase 14.9 (Evidence Collection), Phase 14.10 (Evidence Normalization), Phase 14.11 (Matching & Scoring).
+1. **Reconciliation Engine Sub-Phases**: Phase 14.1 (Payment Intake), Phase 14.2 (Payer Identification), Phase 14.3 (Candidate Invoice Generation), Phase 14.4 (Candidate Filtering), Phase 14.5 (Exact Matching), Phase 14.6 (Partial Matching), Phase 14.7 (Multi-Invoice Matching), Phase 14.8 (Combination Matching), Phase 14.9 (Evidence Collection), Phase 14.10 (Evidence Normalization), Phase 14.11 (Matching & Scoring), Phase 14.12 (Confidence Engine).
 2. **`retrieval_priority` vs Candidate Scoring**: `retrieval_priority` (0–100) is a Phase 14.3 candidate presentation heuristic; composite candidate scoring (`match_score`) belongs strictly to Phase 14.11. Phases 14.5, 14.6, and 14.7 produce factual matching signals only.
 3. **`AUTO_ELIGIBLE`**: High evidence score qualification for expedited human review. NOT `AUTO_APPLIED`.
 4. **Zero LLM Authority**: Deterministic rules decide. AI assists text extraction only. Humans resolve uncertainty.
@@ -240,7 +253,6 @@ See [`docs/roadmap/phase-definitions.md`](file:///h:/AI%20Invoice%20Reconciliati
 ---
 
 ## Up Next:
-- **Phase 14.12**: Confidence Calibration Engine (producing statistically and empirically grounded confidence metrics from deterministic evidence signals, separate from raw scores).
 - **Phase 14.13**: Decision Engine (policy evaluation, `AUTO_ELIGIBLE`, `MATCH_SUGGESTED`, `REVIEW_REQUIRED`, `AMBIGUOUS`).
 - **Phase 15**: Human Review & Exception Workflows.
 - **Phase 16**: Review Center UI & Frontend Integration.
