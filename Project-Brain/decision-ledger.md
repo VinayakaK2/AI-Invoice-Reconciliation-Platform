@@ -325,17 +325,18 @@ This ledger documents the frozen architectural decisions made for the platform.
 ## ADR-020: Deterministic Confidence Engine & Contract Remediation
 - **Date**: 2026-10-17
 - **Status**: Implemented / Ready for Independent Verification
-- **Context**: The reconciliation pipeline requires an objective, reproducible confidence assessment layer to evaluate candidates after Phase 14.11 matching & scoring, before passing them to the Phase 14.13 decision engine. Initial implementation introduced unauthorized mathematical penalties (50% conflict deduction, 40.00 conflict ceiling, 15.00 ambiguity deduction). The review blocker mandated removing these invented penalties, preserving Phase 14.11 score without double counting, factually surfacing conflicts, grounding VERY_HIGH in direct counterparty evidence (Rule P-1), and enforcing a canonical versioned policy.
+- **Context**: The reconciliation pipeline requires an objective, reproducible confidence assessment layer to evaluate candidates after Phase 14.11 matching & scoring, before passing them to the Phase 14.13 decision engine. Initial implementation introduced unauthorized mathematical penalties (50% conflict deduction, 40.00 conflict ceiling, 15.00 ambiguity deduction). The review blocker mandated removing these invented penalties, preserving Phase 14.11 score without double counting, factually surfacing conflicts, decoupling VERY_HIGH from direct counterparty evidence (Rule P-1), and enforcing a canonical versioned policy.
 - **Decision**:
   1. **Strict Architectural Separation**:
      $$\text{Evidence} \neq \text{Scoring} \neq \text{Confidence} \neq \text{Decision} \neq \text{Approval} \neq \text{Financial Mutation}$$
      Confidence assesses evidence quality and candidate distinctiveness. Confidence does NOT make reconciliation decisions or determine allocations.
+     $$\text{Confidence Level} \neq \text{Decision} \quad \text{and} \quad \text{VERY\_HIGH does not imply AUTO\_ELIGIBLE}$$
   2. **Direct Base Score Preservation (No Double Counting, No Invented Penalties)**:
      Candidate confidence score directly anchors to the Phase 14.11 base match score ($\Delta = 0.00$). Base evidence signals are NOT re-added or double counted, and no unauthorized penalties, dampening, or ceilings are applied.
   3. **Factual Conflict Observation**:
      Contradictory or conflicting evidence from candidate bundles or payment context is surfaced factually (`has_conflicting_evidence = True`, `ConfidenceFactorType.CONFLICT_OBSERVED`, $\Delta = 0.00$).
   4. **Canonical Qualitative Confidence Level Mapping**:
-     - `VERY_HIGH`: $90.00 \le \text{score} \le 100.00$ (pure confidence tier; does NOT require direct identifier. Direct identifier is a Phase 14.13 safety precondition for AUTO_ELIGIBLE).
+     - `VERY_HIGH`: $90.00 \le \text{score} \le 100.00$ (highest deterministic confidence band; does NOT require direct identifier grounding. Direct identifier presence is a factual evidence flag relevant to downstream Phase 14.13 decision safety, especially `AUTO_ELIGIBLE`).
      - `HIGH`: $70.00 \le \text{score} < 90.00$.
      - `MEDIUM`: $40.00 \le \text{score} < 70.00$.
      - `LOW`: $0.00 < \text{score} < 40.00$.
@@ -350,7 +351,7 @@ This ledger documents the frozen architectural decisions made for the platform.
      Evaluated in-memory. Zero database mutations (`len(db.dirty) == 0`).
   9. **Tenant Isolation**:
      Strict `company_id` enforcement across use cases and REST endpoints. Cross-tenant access fails closed with HTTP 404.
-- **Consequences**: Remediated implementation verified with 18 automated tests (12 unit, 6 integration/security). Platform regression suite passing 559/559 tests. Status set to `IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION`.
+- **Consequences**: Canonical decoupled implementation verified with 32 automated tests (24 unit, 8 integration/security). Platform regression suite passing 573/573 tests. Status set to `IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION`.
 
 
 

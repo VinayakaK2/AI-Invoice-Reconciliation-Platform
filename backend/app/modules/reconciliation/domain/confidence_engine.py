@@ -53,11 +53,12 @@ class ConfidenceLevel(str, Enum):
     """Canonical qualitative confidence rating for evidence support.
     
     Semantic Meaning:
-    - VERY_HIGH: Deterministic direct counterparty identifier match (Rule P-1).
-    - HIGH:      Strong candidate support without direct identifier (e.g. invoice reference + exact amount).
-    - MEDIUM:    Moderate evidence support (e.g. exact amount or name match only).
-    - LOW:       Weak circumstantial support.
-    - NONE:      Zero match score or absent supporting evidence.
+    - VERY_HIGH: Highest deterministic confidence band, score 90–100.
+                 VERY_HIGH does not require direct identifier grounding.
+    - HIGH:      70–89.
+    - MEDIUM:    40–69.
+    - LOW:       1–39.
+    - NONE:      0.
     """
 
     VERY_HIGH = "VERY_HIGH"
