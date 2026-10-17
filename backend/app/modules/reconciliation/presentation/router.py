@@ -29,6 +29,8 @@ from app.modules.reconciliation.application.use_cases import (
     BatchEvidenceNormalizationUseCase,
     MatchingScoringUseCase,
     BatchMatchingScoringUseCase,
+    ConfidenceAssessmentUseCase,
+    BatchConfidenceAssessmentUseCase,
 )
 from app.modules.reconciliation.domain.candidate_filters import (
     CandidateFilterCriteria,
@@ -136,6 +138,12 @@ from app.modules.reconciliation.presentation.schemas import (
     MatchingScoringResponse,
     BatchMatchingScoringRequest,
     BatchMatchingScoringResponse,
+    ConfidenceAdjustmentFactorResponse,
+    CandidateConfidenceAssessmentResponse,
+    ConfidenceAssessmentRequest,
+    ConfidenceAssessmentResponse,
+    BatchConfidenceAssessmentRequest,
+    BatchConfidenceAssessmentResponse,
     mask_bank_account,
     mask_evidence_matched_value,
 )
@@ -143,6 +151,11 @@ from app.modules.reconciliation.domain.matching_scoring import (
     CandidateScoreResult,
     MatchingScoringResult,
     ScoreContribution,
+)
+from app.modules.reconciliation.domain.confidence_engine import (
+    CandidateConfidenceAssessment,
+    ConfidenceAdjustmentFactor,
+    ConfidenceEngineResult,
 )
 
 router = APIRouter(prefix="/reconciliation", tags=["Reconciliation"])
@@ -1978,5 +1991,223 @@ def score_payment_candidates(
     return {
         "success": True,
         "data": _map_matching_scoring_result_to_response(result),
+    }
+
+
+# ==============================================================================
+# Phase 14.12 Confidence Engine Presentation Mapping & Endpoints
+# ==============================================================================
+
+
+def _map_confidence_adjustment_factor_to_response(
+    factor: ConfidenceAdjustmentFactor,
+) -> ConfidenceAdjustmentFactorResponse:
+    """Map domain ConfidenceAdjustmentFactor to presentation DTO."""
+    return ConfidenceAdjustmentFactorResponse(
+        factor_type=factor.factor_type.value,
+        delta=str(factor.delta),
+        description=factor.description,
+    )
+
+
+def _map_candidate_confidence_to_response(
+    assessment: CandidateConfidenceAssessment,
+) -> CandidateConfidenceAssessmentResponse:
+    """Map domain CandidateConfidenceAssessment to presentation DTO."""
+    return CandidateConfidenceAssessmentResponse(
+        invoice_id=assessment.invoice_id,
+        invoice_number=assessment.invoice_number,
+        confidence_score=str(assessment.confidence_score),
+        confidence_level=assessment.confidence_level.value,
+        base_match_score=str(assessment.base_match_score),
+        has_direct_evidence=assessment.has_direct_evidence,
+        has_conflicting_evidence=assessment.has_conflicting_evidence,
+        adjustment_factors=[
+            _map_confidence_adjustment_factor_to_response(f)
+            for f in assessment.adjustment_factors
+        ],
+        rule_version=assessment.rule_version,
+        scoring_algorithm_version=assessment.scoring_algorithm_version,
+        confidence_algorithm_version=assessment.confidence_algorithm_version,
+        is_statistically_calibrated=assessment.is_statistically_calibrated,
+    )
+
+
+def _map_confidence_engine_result_to_response(
+    result: ConfidenceEngineResult,
+) -> ConfidenceAssessmentResponse:
+    """Map domain ConfidenceEngineResult to presentation DTO."""
+    return ConfidenceAssessmentResponse(
+        payment_id=result.payment_id,
+        company_id=result.company_id,
+        candidate_assessments=[
+            _map_candidate_confidence_to_response(c)
+            for c in result.candidate_assessments
+        ],
+        total_candidates_evaluated=result.total_candidates_evaluated,
+        rule_version=result.rule_version,
+        scoring_algorithm_version=result.scoring_algorithm_version,
+        confidence_algorithm_version=result.confidence_algorithm_version,
+        is_deterministic=result.is_deterministic,
+        is_statistically_calibrated=result.is_statistically_calibrated,
+        evaluated_at=result.evaluated_at.isoformat(),
+    )
+
+
+@router.post(
+    "/confidence/batch",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def batch_assess_payment_confidence(
+    payload: Optional[BatchConfidenceAssessmentRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Batch evaluate confidence assessments across multiple unreconciled payments.
+
+    Guarantees:
+    - Bounded to max limit of 100 payments.
+    - Zero financial accounting state mutation.
+    - Strict tenant isolation: scoped to authenticated current_user.company_id.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    collection_use_case = EvidenceCollectionUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    normalization_use_case = EvidenceNormalizationUseCase(
+        evidence_collection_use_case=collection_use_case,
+    )
+    scoring_use_case = MatchingScoringUseCase(
+        evidence_normalization_use_case=normalization_use_case,
+    )
+    confidence_use_case = ConfidenceAssessmentUseCase(
+        matching_scoring_use_case=scoring_use_case,
+    )
+    batch_use_case = BatchConfidenceAssessmentUseCase(
+        payment_lookup_port=payment_adapter,
+        confidence_assessment_use_case=confidence_use_case,
+    )
+
+    payment_ids = payload.payment_ids if payload else None
+    limit = payload.limit if payload else 50
+    filter_criteria = None
+
+    if payload and payload.filter_criteria:
+        fc = payload.filter_criteria
+        statuses = (
+            set(fc.allowed_statuses)
+            if fc.allowed_statuses is not None
+            else {"PENDING", "PARTIALLY_PAID"}
+        )
+        filter_criteria = CandidateFilterCriteria(
+            min_amount=fc.min_amount,
+            max_amount=fc.max_amount,
+            max_lookback_days=fc.max_lookback_days,
+            max_advance_days=fc.max_advance_days,
+            require_causality=fc.require_causality,
+            allowed_statuses=statuses,
+            require_reference_match=fc.require_reference_match,
+            disallow_overpayment=fc.disallow_overpayment,
+            max_candidates=fc.max_candidates,
+        )
+
+    results = batch_use_case.execute(
+        company_id=current_user.company_id,
+        payment_ids=payment_ids,
+        limit=limit,
+        filter_criteria=filter_criteria,
+    )
+
+    response_dtos = [_map_confidence_engine_result_to_response(r) for r in results]
+
+    return {
+        "success": True,
+        "data": {
+            "results": response_dtos,
+            "total_evaluated": len(response_dtos),
+        },
+    }
+
+
+@router.post(
+    "/confidence/{payment_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+)
+def assess_payment_confidence(
+    payment_id: UUID,
+    payload: Optional[ConfidenceAssessmentRequest] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Calculate deterministic candidate confidence assessments based on scored evidence.
+
+    Guarantees:
+    - Zero financial accounting state mutation (Observed Financial Mutation: NONE).
+    - Fail-closed IDOR security (404 Not Found for cross-tenant payment or customer access).
+    - Pure Decimal arithmetic; bounds confidence scores to [0.00, 100.00].
+    - Traceable breakdown: explainable adjustment factors.
+    - Non-Decision: Confidence only. Never outputs AUTO_ELIGIBLE, MATCH_SUGGESTED, or allocation.
+    - Zero Probability Claims: Flags is_statistically_calibrated=False.
+    """
+    payment_adapter = SQLAlchemyPaymentLookupAdapter(db=db)
+    customer_adapter = SQLAlchemyCustomerLookupAdapter(db=db)
+    invoice_adapter = SQLAlchemyInvoiceLookupAdapter(db=db)
+
+    collection_use_case = EvidenceCollectionUseCase(
+        payment_lookup_port=payment_adapter,
+        customer_lookup_port=customer_adapter,
+        invoice_lookup_port=invoice_adapter,
+    )
+    normalization_use_case = EvidenceNormalizationUseCase(
+        evidence_collection_use_case=collection_use_case,
+    )
+    scoring_use_case = MatchingScoringUseCase(
+        evidence_normalization_use_case=normalization_use_case,
+    )
+    confidence_use_case = ConfidenceAssessmentUseCase(
+        matching_scoring_use_case=scoring_use_case,
+    )
+
+    filter_criteria = None
+    override_customer_id = None
+
+    if payload:
+        override_customer_id = payload.override_customer_id
+        if payload.filter_criteria:
+            fc = payload.filter_criteria
+            statuses = (
+                set(fc.allowed_statuses)
+                if fc.allowed_statuses is not None
+                else {"PENDING", "PARTIALLY_PAID"}
+            )
+            filter_criteria = CandidateFilterCriteria(
+                min_amount=fc.min_amount,
+                max_amount=fc.max_amount,
+                max_lookback_days=fc.max_lookback_days,
+                max_advance_days=fc.max_advance_days,
+                require_causality=fc.require_causality,
+                allowed_statuses=statuses,
+                require_reference_match=fc.require_reference_match,
+                disallow_overpayment=fc.disallow_overpayment,
+                max_candidates=fc.max_candidates,
+            )
+
+    result = confidence_use_case.execute(
+        payment_id=payment_id,
+        company_id=current_user.company_id,
+        filter_criteria=filter_criteria,
+        override_customer_id=override_customer_id,
+    )
+
+    return {
+        "success": True,
+        "data": _map_confidence_engine_result_to_response(result),
     }
 

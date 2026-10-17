@@ -71,6 +71,11 @@ from app.modules.reconciliation.domain.matching_scoring import (
     MatchingScoringResult,
     ScoringWeightsConfig,
 )
+from app.modules.reconciliation.domain.confidence_engine import (
+    ConfidenceConfig,
+    ConfidenceEngine,
+    ConfidenceEngineResult,
+)
 from app.modules.reconciliation.domain.rules import PayerIdentificationRuleEngine
 from app.shared.exceptions import ForbiddenError, NotFoundError, ValidationError
 
@@ -1589,6 +1594,148 @@ class BatchMatchingScoringUseCase:
                     company_id=company_id,
                     filter_criteria=filter_criteria,
                     scoring_config=scoring_config,
+                )
+                results.append(res)
+
+        return results
+
+
+# ==============================================================================
+# Phase 14.12 Confidence Engine Application Use Cases
+# ==============================================================================
+
+
+class ConfidenceAssessmentUseCase:
+    """Orchestrates Phase 14.12 Confidence Engine evaluation for a single payment.
+
+    Flow:
+    1. Orchestrates upstream Phase 14.10 Evidence Normalization.
+    2. Orchestrates upstream Phase 14.11 Matching & Scoring.
+    3. Evaluates deterministic Confidence Assessment across all scored candidates.
+
+    Guarantees:
+    - Zero financial accounting state mutation (len(db.dirty) == 0, len(db.new) == 0).
+    - Strict tenant isolation: payment must belong to authenticated company_id.
+    - Deterministic ranking: candidates ordered by (-confidence_score, -base_match_score, invoice_number, str(invoice_id)).
+    - Non-decision boundary: outputs confidence assessments only (is_statistically_calibrated=False).
+    """
+
+    def __init__(
+        self,
+        matching_scoring_use_case: MatchingScoringUseCase,
+        confidence_engine: Optional[ConfidenceEngine] = None,
+    ) -> None:
+        self.matching_scoring_use_case = matching_scoring_use_case
+        self.confidence_engine = confidence_engine or ConfidenceEngine()
+
+    def execute(
+        self,
+        payment_id: UUID,
+        company_id: UUID,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+        override_customer_id: Optional[UUID] = None,
+        scoring_config: Optional[ScoringWeightsConfig] = None,
+        confidence_config: Optional[ConfidenceConfig] = None,
+    ) -> ConfidenceEngineResult:
+        """Execute Phase 14.12 Confidence Assessment within authenticated tenant boundary."""
+        # 1. Fetch upstream normalization result (inherits candidate lookup and tenant validation)
+        normalization_result = (
+            self.matching_scoring_use_case.evidence_normalization_use_case.execute(
+                payment_id=payment_id,
+                company_id=company_id,
+                filter_criteria=filter_criteria,
+                override_customer_id=override_customer_id,
+            )
+        )
+
+        # 2. Evaluate upstream Phase 14.11 Matching & Scoring
+        scoring_engine = self.matching_scoring_use_case.scoring_engine
+        if scoring_config is not None:
+            scoring_engine = MatchingScoringEngine(
+                config=scoring_config,
+                is_empirically_validated=self.matching_scoring_use_case.scoring_engine.is_empirically_validated,
+            )
+        scoring_result = scoring_engine.evaluate(normalization_result=normalization_result)
+
+        # 3. Configure confidence engine if custom configuration provided
+        engine = self.confidence_engine
+        if confidence_config is not None:
+            engine = ConfidenceEngine(config=confidence_config)
+
+        # 4. Evaluate deterministic confidence across all scored candidates
+        return engine.evaluate(
+            scoring_result=scoring_result,
+            normalization_result=normalization_result,
+        )
+
+
+class BatchConfidenceAssessmentUseCase:
+    """Batch evaluate confidence assessments across multiple unreconciled payments.
+
+    Guarantees:
+    - Bounded to MAX_BATCH_SIZE = 100 payments.
+    - Zero financial accounting state mutation across all evaluated payments.
+    - Strict tenant isolation: all evaluated payments belong to authenticated company_id.
+    """
+
+    MAX_BATCH_SIZE = 100
+
+    def __init__(
+        self,
+        payment_lookup_port: PaymentLookupPort,
+        confidence_assessment_use_case: ConfidenceAssessmentUseCase,
+    ) -> None:
+        self.payment_lookup_port = payment_lookup_port
+        self.confidence_assessment_use_case = confidence_assessment_use_case
+
+    def execute(
+        self,
+        company_id: UUID,
+        payment_ids: Optional[List[UUID]] = None,
+        limit: int = 50,
+        filter_criteria: Optional[CandidateFilterCriteria] = None,
+        scoring_config: Optional[ScoringWeightsConfig] = None,
+        confidence_config: Optional[ConfidenceConfig] = None,
+    ) -> List[ConfidenceEngineResult]:
+        """Execute confidence assessment evaluation across payments within tenant boundary."""
+        if limit < 1 or limit > self.MAX_BATCH_SIZE:
+            raise ValidationError(
+                f"Batch limit must be between 1 and {self.MAX_BATCH_SIZE}."
+            )
+
+        results: List[ConfidenceEngineResult] = []
+
+        if payment_ids:
+            if len(payment_ids) > self.MAX_BATCH_SIZE:
+                raise ValidationError(
+                    f"Requested {len(payment_ids)} payments exceeds maximum batch limit of {self.MAX_BATCH_SIZE}."
+                )
+            for p_id in payment_ids:
+                payment_context = self.payment_lookup_port.get_payment_intake_context(
+                    payment_id=p_id,
+                    company_id=company_id,
+                )
+                if payment_context:
+                    res = self.confidence_assessment_use_case.execute(
+                        payment_id=p_id,
+                        company_id=company_id,
+                        filter_criteria=filter_criteria,
+                        scoring_config=scoring_config,
+                        confidence_config=confidence_config,
+                    )
+                    results.append(res)
+        else:
+            payment_contexts = self.payment_lookup_port.list_unreconciled_payment_contexts(
+                company_id=company_id,
+                limit=limit,
+            )
+            for payment_context in payment_contexts:
+                res = self.confidence_assessment_use_case.execute(
+                    payment_id=payment_context.payment_id,
+                    company_id=company_id,
+                    filter_criteria=filter_criteria,
+                    scoring_config=scoring_config,
+                    confidence_config=confidence_config,
                 )
                 results.append(res)
 

@@ -174,5 +174,24 @@ __all__ = [
     "MatchingScoringResult",
     "MatchingScoringEngine",
     "DEFAULT_SCORING_WEIGHTS",
+    # Phase 14.12 Confidence Engine
+    "ConfidenceLevel",
+    "ConfidenceFactorType",
+    "ConfidenceAdjustmentFactor",
+    "ConfidenceConfig",
+    "DEFAULT_CONFIDENCE_CONFIG",
+    "CandidateConfidenceAssessment",
+    "ConfidenceEngineResult",
+    "ConfidenceEngine",
 ]
+from app.modules.reconciliation.domain.confidence_engine import (
+    CandidateConfidenceAssessment,
+    ConfidenceAdjustmentFactor,
+    ConfidenceConfig,
+    ConfidenceEngine,
+    ConfidenceEngineResult,
+    ConfidenceFactorType,
+    ConfidenceLevel,
+    DEFAULT_CONFIDENCE_CONFIG,
+)
 

@@ -45,6 +45,9 @@
 | **Phase 14.9** | Reconciliation Engine: Evidence Collection | Code | **FROZEN** | `docs/phase-history/phase-14-9-evidence-collection.md` |
 | **Phase 14.10** | Reconciliation Engine: Evidence Normalization | Code | **FROZEN** | `docs/phase-history/phase-14-10-evidence-normalization.md` |
 | **Phase 14.11** | Reconciliation Engine: Matching & Scoring | Code | **FROZEN** | `docs/phase-history/phase-14-11-matching-scoring.md` |
+| **Phase 14.12** | Reconciliation Engine: Confidence Engine | Code | **IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION** | `docs/phase-history/phase-14-12-confidence-engine.md` |
+| **Phase 14.13** | Reconciliation Engine: Decision Engine | Code | PENDING | — |
+| **Phase 14.14** | Reconciliation Engine: Decision Object | Code | PENDING | — |
 | **Phase 15** | Review Center | Code | PENDING | — |
 | **Phase 16** | Dashboard | Code | PENDING | — |
 | **Phase 17** | Audit & Compliance Foundation | Code | PENDING | — |
