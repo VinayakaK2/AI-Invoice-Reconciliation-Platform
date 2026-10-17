@@ -50,7 +50,7 @@ The system computes a deterministic heuristic **`match_score` (0.00 to 100.00)**
 
 Structured evidence signals:
 - `IDENTIFIER_MATCH` (+40 points): Direct account/UPI match.
-- `INVOICE_NUMBER_MATCH` (+35 points): Explicit invoice number in narration.
+- `INVOICE_NUMBER_MATCH` (+35 points): Explicit candidate invoice number present in payment_reference or narration.
 - `AMOUNT_EXACT_MATCH` (+30 points): Invoice or combination sum equals payment.
 - `CUSTOMER_NAME_MATCH` (+20 points): Verified customer name/alias match.
 - `DATE_PROXIMITY_MATCH` (+10 points): Payment date is within 30 days of invoice due date.
