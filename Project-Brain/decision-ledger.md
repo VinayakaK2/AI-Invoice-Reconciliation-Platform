@@ -324,7 +324,7 @@ This ledger documents the frozen architectural decisions made for the platform.
 
 ## ADR-020: Deterministic Confidence Engine & Contract Remediation
 - **Date**: 2026-10-17
-- **Status**: Implemented / Ready for Independent Verification
+- **Status**: Accepted / Frozen
 - **Context**: The reconciliation pipeline requires an objective, reproducible confidence assessment layer to evaluate candidates after Phase 14.11 matching & scoring, before passing them to the Phase 14.13 decision engine. Initial implementation introduced unauthorized mathematical penalties (50% conflict deduction, 40.00 conflict ceiling, 15.00 ambiguity deduction). The review blocker mandated removing these invented penalties, preserving Phase 14.11 score without double counting, factually surfacing conflicts, decoupling VERY_HIGH from direct counterparty evidence (Rule P-1), and enforcing a canonical versioned policy.
 - **Decision**:
   1. **Strict Architectural Separation**:
@@ -351,7 +351,7 @@ This ledger documents the frozen architectural decisions made for the platform.
      Evaluated in-memory. Zero database mutations (`len(db.dirty) == 0`).
   9. **Tenant Isolation**:
      Strict `company_id` enforcement across use cases and REST endpoints. Cross-tenant access fails closed with HTTP 404.
-- **Consequences**: Canonical decoupled implementation verified with 32 automated tests (24 unit, 8 integration/security). Platform regression suite passing 573/573 tests. Status set to `IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION`.
+- **Consequences**: Canonical decoupled implementation independently certified with 32 automated tests (24 unit, 8 integration/security) and the reported 573/573 full platform regression suite. PR #13 was independently verified and merged into `main` with merge commit `24914372be5a138c241523db7c69e1343ec8e213`. Phase 14.12 is **CERTIFIED and FROZEN**; Phase 14.13 is the next permitted phase.
 
 
 
