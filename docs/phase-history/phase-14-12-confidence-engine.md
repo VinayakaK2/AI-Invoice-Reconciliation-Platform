@@ -1,6 +1,6 @@
 # Phase 14.12 — Confidence Engine Specification & Verification Report
 
-## Status: IMPLEMENTED — READY FOR INDEPENDENT VERIFICATION
+## Status: FROZEN
 
 ---
 
@@ -59,7 +59,7 @@ backend/app/modules/reconciliation/
 
 ### Domain Models (`confidence_engine.py`)
 - `ConfidenceLevel`: Enum (`VERY_HIGH`, `HIGH`, `MEDIUM`, `LOW`, `NONE`).
-- `ConfidenceFactorType`: Enum identifying exact reasons for confidence adjustments (`BASE_MATCH_SCORE`, `DIRECT_IDENTIFIER_GROUNDING`, `CONFLICT_OBSERVED`).
+- `ConfidenceFactorType`: Enum identifying exact reasons for confidence assessment provenance (`BASE_MATCH_SCORE`, `DIRECT_IDENTIFIER_GROUNDING`, `CONFLICT_OBSERVED`, `INCOMPLETE_EVIDENCE_OBSERVED`).
 - `ConfidenceAdjustmentFactor`: Transparent explanation DTO with `factor_type`, `delta`, and `description`.
 - `ConfidencePolicy`: Canonical immutable threshold configuration (`CANONICAL_CONFIDENCE_POLICY`) with fail-closed validation.
 - `CandidateConfidenceAssessment`: Evaluated candidate with `invoice_id`, `invoice_number`, `base_match_score`, `confidence_score`, `confidence_level`, `has_direct_evidence`, `has_conflicting_evidence`, `is_statistically_calibrated=False`, and adjustment audit trail.
@@ -130,7 +130,7 @@ collected 573 items
 ........................................................................ [ 75%]
 ........................................................................ [ 87%]
 .....................................................................    [100%]
-573 passed in 128.87s (0:02:08)
+573 passed in 181.41s (0:03:01)
 ```
 
 ---
@@ -143,7 +143,16 @@ collected 573 items
 
 ---
 
-## 6. Non-Goals for Phase 14.12
+## 6. Final Certification
+- **Independent repository verification:** CERTIFIED
+- **PR:** #13 — merged
+- **Merge commit:** `24914372be5a138c241523db7c69e1343ec8e213`
+- **Final Phase Status:** **FROZEN**
+- **Next permitted phase:** Phase 14.13 — Decision Engine
+
+---
+
+## 7. Non-Goals for Phase 14.12
 - Decision engine policy (`AUTO_ELIGIBLE`, `MATCH_SUGGESTED`, `NEEDS_REVIEW`) $\rightarrow$ strictly deferred to Phase 14.13.
 - Decision objects and human review workflow routing $\rightarrow$ Phase 14.14.
 - Invoice and Payment ledger allocation, settlement, or balance updates $\rightarrow$ downstream financial state mutation phases.
