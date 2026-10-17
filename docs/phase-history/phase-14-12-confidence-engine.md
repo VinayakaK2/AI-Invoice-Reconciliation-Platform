@@ -22,7 +22,7 @@ The Confidence Engine takes the already-established candidate scores from Phase 
 3. **Deterministic Anchoring & Anti-Double Counting**: Candidates anchor directly to their exact Phase 14.11 base match score ($\Delta = 0.00$). Base evidence weights (invoice reference, amount match, bank account, date proximity) are NOT re-added or double-counted.
 4. **Zero Invented Penalties, Ceilings, or Deductions**: Remediation removed unauthorized 50% conflict deductions, 40.00 conflict ceilings, and 15.00 point ambiguity penalties.
 5. **Factual Conflict Observation**: Conflicting evidence is surfaced factually (`has_conflicting_evidence = True`, `ConfidenceFactorType.CONFLICT_OBSERVED`, $\Delta = 0.00$) rather than applying synthetic score subtractions.
-6. **Direct Grounding Requirement**: `VERY_HIGH` strictly requires direct counterparty identifier match (Rule P-1 Bank Account or UPI VPA match). High scoring candidates without direct identifier evaluate to `HIGH`.
+6. **Decoupled Classification**: `VERY_HIGH` is a pure confidence band ($\ge 90.00$) and does NOT require direct counterparty identifier grounding (Rule P-1). Direct identifier grounding is a separate Phase 14.13 safety condition for `AUTO_ELIGIBLE`, not a confidence classification condition.
 7. **Empirical Calibration Boundary**: Confidence scores are explicitly marked `is_statistically_calibrated=False`, preventing misleading claims of Bayesian or ML posterior probability.
 8. **Pure Decimal Arithmetic**: All computations use `Decimal` with `ROUND_HALF_UP` bounded to $[0.00, 100.00]$, avoiding binary floating-point rounding errors.
 9. **Canonical Versioned Policy**: Formalized as `ConfidencePolicy` (`CANONICAL_CONFIDENCE_POLICY`).
@@ -33,13 +33,13 @@ The Confidence Engine takes the already-established candidate scores from Phase 
 
 The qualitative mapping is strictly bounded and semantic:
 
-| Qualitative Level | Score Range | Direct Evidence Grounding Required? | Description |
-|---|---|---|---|
-| `VERY_HIGH` | $[90.00, 100.00]$ | **YES** (Rule P-1) | Direct counterparty identifier verified (Bank Account / UPI VPA) with strong aggregate support. |
-| `HIGH` | $[70.00, 100.00]$ | NO | Strong supporting evidence (e.g. invoice reference + exact amount) or high score without direct identifier grounding. |
-| `MEDIUM` | $[40.00, 69.99]$ | NO | Moderate supporting evidence (e.g. exact amount or customer name match). |
-| `LOW` | $[0.01, 39.99]$ | NO | Weak circumstantial evidence. |
-| `NONE` | $0.00$ | NO | No matching signals or zero base score. |
+| Qualitative Level | Score Range | Description |
+|---|---|---|
+| `VERY_HIGH` | $[90.00, 100.00]$ | Highest tier deterministic candidate support. |
+| `HIGH` | $[70.00, 89.99]$ | Strong supporting evidence. |
+| `MEDIUM` | $[40.00, 69.99]$ | Moderate supporting evidence. |
+| `LOW` | $[0.01, 39.99]$ | Weak circumstantial evidence. |
+| `NONE` | $0.00$ | No matching signals or zero base score. |
 
 ---
 
@@ -70,53 +70,67 @@ backend/app/modules/reconciliation/
 ## 4. Test Verification Summary
 
 ### Targeted Test Suite
-- Unit Tests: `tests/unit/test_confidence_engine_rules.py` (12 passed)
-- Integration & IDOR Tests: `tests/integration/test_confidence_engine_api.py` (6 passed)
-- **Subtotal Phase 14.12 Tests**: **18 passed**
+- Unit Tests: `tests/unit/test_confidence_engine_rules.py` (24 passed)
+- Integration, IDOR & Benchmark Tests: `tests/integration/test_confidence_engine_api.py` (8 passed)
+- **Subtotal Phase 14.12 Tests**: **32 passed**
 
 ### Targeted Suite Output
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.11.8, pytest-9.1.1, pluggy-1.6.0
-collected 18 items
+collected 32 items
 
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_base_score_anchoring_unconflicted PASSED [  5%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_qualitative_confidence_levels_semantic_mapping PASSED [ 11%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_conflict_surfaced_factually_without_invented_penalties PASSED [ 16%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_direct_evidence_grounding_flag PASSED [ 22%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_competing_candidates_preserve_scores_without_dampening PASSED [ 27%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_zero_score_remains_zero_none PASSED [ 33%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_100_run_permutation_determinism PASSED [ 38%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_adversarial_mismatched_payment_tenant_id_fails_closed PASSED [ 44%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_custom_confidence_policy_thresholds PASSED [ 50%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_invalid_policy_threshold_ordering_raises_domain_error PASSED [ 55%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_deterministic_ranking_order_ties PASSED [ 61%]
-tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineRules::test_out_of_bounds_confidence_score_raises_domain_error PASSED [ 66%]
-tests/integration/test_confidence_engine_api.py::test_confidence_api_e2e PASSED [ 72%]
-tests/integration/test_confidence_engine_api.py::test_confidence_zero_financial_mutation PASSED [ 77%]
-tests/integration/test_confidence_engine_api.py::test_confidence_cross_tenant_payment_idor PASSED [ 83%]
-tests/integration/test_confidence_engine_api.py::test_confidence_cross_tenant_customer_override_idor PASSED [ 88%]
-tests/integration/test_confidence_engine_api.py::test_confidence_unauthenticated_rejected PASSED [ 94%]
-tests/integration/test_confidence_engine_api.py::test_batch_confidence_endpoint PASSED [100%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[0.00-NONE] PASSED [  3%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[1.00-LOW] PASSED [  6%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[39.00-LOW] PASSED [  9%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[39.99-LOW] PASSED [ 12%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[40.00-MEDIUM] PASSED [ 15%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[69.00-MEDIUM] PASSED [ 18%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[69.99-MEDIUM] PASSED [ 21%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[70.00-HIGH] PASSED [ 25%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[89.00-HIGH] PASSED [ 28%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[89.99-HIGH] PASSED [ 31%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[90.00-VERY_HIGH] PASSED [ 34%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[95.00-VERY_HIGH] PASSED [ 37%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_confidence_presentation_bands[100.00-VERY_HIGH] PASSED [ 40%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_very_high_does_not_require_direct_identifier PASSED [ 43%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_anti_penalty_conflict_does_not_reduce_score PASSED [ 46%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_anti_bonus_direct_identifier_does_not_add_points PASSED [ 50%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_multi_invoice_match_does_not_receive_penalty PASSED [ 53%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_incomplete_evidence_surfaced_factually_without_penalty PASSED [ 56%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_decision_separation_no_decision_fields PASSED [ 59%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_statistical_calibration_explicitly_false PASSED [ 62%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_100_run_permutation_determinism PASSED [ 65%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_canonical_schema_alias_properties PASSED [ 68%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_deterministic_ranking_order_ties PASSED [ 71%]
+tests/unit/test_confidence_engine_rules.py::TestConfidenceEngineCanonicalRules::test_out_of_bounds_confidence_score_raises_domain_error PASSED [ 75%]
+tests/integration/test_confidence_engine_api.py::test_confidence_api_e2e PASSED [ 78%]
+tests/integration/test_confidence_engine_api.py::test_confidence_zero_financial_mutation PASSED [ 81%]
+tests/integration/test_confidence_engine_api.py::test_confidence_cross_tenant_payment_idor PASSED [ 84%]
+tests/integration/test_confidence_engine_api.py::test_confidence_cross_tenant_customer_override_idor PASSED [ 87%]
+tests/integration/test_confidence_engine_api.py::test_confidence_unauthenticated_rejected PASSED [ 90%]
+tests/integration/test_confidence_engine_api.py::test_batch_confidence_endpoint PASSED [ 93%]
+tests/integration/test_confidence_engine_api.py::test_batch_confidence_exceeds_max_limit_rejected PASSED [ 96%]
+tests/integration/test_confidence_engine_api.py::test_confidence_performance_benchmark PASSED [100%]
 
-============================= 18 passed in 3.62s ==============================
+============================= 32 passed in 4.49s ==============================
 ```
 
 ### Full Platform Regression Suite Output
 ```text
 ============================= test session starts =============================
 platform win32 -- Python 3.11.8, pytest-9.1.1, pluggy-1.6.0
-collected 559 items
+collected 573 items
 
 ........................................................................ [ 12%]
 ........................................................................ [ 25%]
-........................................................................ [ 38%]
-........................................................................ [ 51%]
-........................................................................ [ 64%]
-........................................................................ [ 77%]
-........................................................................ [ 90%]
-.......................................................                  [100%]
-559 passed in 208.85s (0:03:28)
+........................................................................ [ 37%]
+........................................................................ [ 50%]
+........................................................................ [ 62%]
+........................................................................ [ 75%]
+........................................................................ [ 87%]
+.....................................................................    [100%]
+573 passed in 128.87s (0:02:08)
 ```
 
 ---

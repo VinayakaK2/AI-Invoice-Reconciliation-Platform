@@ -2016,12 +2016,19 @@ def _map_candidate_confidence_to_response(
     """Map domain CandidateConfidenceAssessment to presentation DTO."""
     return CandidateConfidenceAssessmentResponse(
         invoice_id=assessment.invoice_id,
+        candidate_id=assessment.candidate_id,
+        payment_id=assessment.payment_id,
         invoice_number=assessment.invoice_number,
         confidence_score=str(assessment.confidence_score),
         confidence_level=assessment.confidence_level.value,
         base_match_score=str(assessment.base_match_score),
+        match_score=str(assessment.match_score),
         has_direct_evidence=assessment.has_direct_evidence,
+        direct_evidence_present=assessment.direct_evidence_present,
         has_conflicting_evidence=assessment.has_conflicting_evidence,
+        conflicting_evidence_present=assessment.conflicting_evidence_present,
+        has_incomplete_evidence=assessment.has_incomplete_evidence,
+        incomplete_evidence_present=assessment.incomplete_evidence_present,
         adjustment_factors=[
             _map_confidence_adjustment_factor_to_response(f)
             for f in assessment.adjustment_factors
@@ -2029,6 +2036,7 @@ def _map_candidate_confidence_to_response(
         rule_version=assessment.rule_version,
         scoring_algorithm_version=assessment.scoring_algorithm_version,
         confidence_algorithm_version=assessment.confidence_algorithm_version,
+        algorithm_version=assessment.algorithm_version,
         is_statistically_calibrated=assessment.is_statistically_calibrated,
     )
 

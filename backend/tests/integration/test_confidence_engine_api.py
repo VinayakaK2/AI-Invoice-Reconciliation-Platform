@@ -121,6 +121,13 @@ def test_confidence_api_e2e(
     assert top_cand["confidence_level"] == "VERY_HIGH"
     assert top_cand["has_direct_evidence"] is True
     assert top_cand["has_conflicting_evidence"] is False
+    assert top_cand["has_incomplete_evidence"] is False
+    assert top_cand["candidate_id"] == top_cand["invoice_id"]
+    assert top_cand["match_score"] == top_cand["base_match_score"]
+    assert top_cand["direct_evidence_present"] == top_cand["has_direct_evidence"]
+    assert top_cand["conflicting_evidence_present"] == top_cand["has_conflicting_evidence"]
+    assert top_cand["incomplete_evidence_present"] == top_cand["has_incomplete_evidence"]
+    assert top_cand["algorithm_version"] == "14.12.0"
     assert top_cand["is_statistically_calibrated"] is False
     assert len(top_cand["adjustment_factors"]) >= 1
 
@@ -301,3 +308,50 @@ def test_batch_confidence_endpoint(
         assert item["is_deterministic"] is True
         assert item["is_statistically_calibrated"] is False
         assert item["confidence_algorithm_version"] == "14.12.0"
+
+
+def test_batch_confidence_exceeds_max_limit_rejected(
+    client: TestClient, registered_owner: dict
+) -> None:
+    """Verify batch requests exceeding MAX_BATCH_SIZE (100) are rejected."""
+    headers = registered_owner["headers"]
+    resp = client.post(
+        "/api/v1/reconciliation/confidence/batch",
+        headers=headers,
+        json={"limit": 101},
+    )
+    assert resp.status_code == 422
+
+
+def test_confidence_performance_benchmark(
+    client: TestClient, registered_owner: dict
+) -> None:
+    """Benchmark confidence endpoint evaluation execution time."""
+    import time
+    headers = registered_owner["headers"]
+
+    # Ingest a payment
+    pay_resp = client.post(
+        "/api/v1/payments",
+        headers=headers,
+        json={
+            "transaction_date": str(date.today()),
+            "amount": "15000.00",
+            "currency": "INR",
+            "narration": "Benchmark Payment",
+        },
+    )
+    payment_id = pay_resp.json()["data"]["id"]
+
+    # Measure single candidate confidence latency
+    start_time = time.perf_counter()
+    resp = client.post(
+        f"/api/v1/reconciliation/confidence/{payment_id}",
+        headers=headers,
+        json={},
+    )
+    duration_ms = (time.perf_counter() - start_time) * 1000
+
+    assert resp.status_code == 200
+    # In-memory confidence evaluation should complete rapidly (< 1000ms including HTTP testclient)
+    assert duration_ms < 1000.0

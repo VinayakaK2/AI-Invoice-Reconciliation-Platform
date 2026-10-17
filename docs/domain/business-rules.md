@@ -58,7 +58,25 @@ Structured evidence signals:
 
 $$\text{match\_score} = \min\left(100, \sum \text{Weights of Active Unconflicted Evidence}\right)$$
 
-### 2.5 Decision Policy Thresholds
+### 2.5 Confidence Engine Rules (`confidence_score`)
+Phase 14.12 establishes a deterministic confidence evaluation layer sitting strictly between Match Scoring (Phase 14.11) and Decisioning (Phase 14.13).
+
+Invariant Principle:
+$$\text{Matching} \neq \text{Confidence} \neq \text{Decision} \neq \text{Approval} \neq \text{Financial Mutation}$$
+
+Canonical Contract:
+1. **Deterministic Score Preservation**: For MVP, `confidence_score = match_score` (Phase 14.11). There are no secondary scoring models, no percentage-based weighting transforms, no conflict percentage subtractions, no candidate-difference ambiguity penalties, and no hard score ceilings.
+2. **Canonical Presentation Bands**:
+   - `VERY_HIGH`: $90.00 \le \text{score} \le 100.00$
+   - `HIGH`: $70.00 \le \text{score} < 90.00$
+   - `MEDIUM`: $40.00 \le \text{score} < 70.00$
+   - `LOW`: $0.00 < \text{score} < 40.00$
+   - `NONE`: $\text{score} == 0.00$
+3. **Decoupled Classification**: `VERY_HIGH` is a pure confidence band ($\ge 90.00$) and does NOT require direct counterparty identifier grounding (Rule P-1). Direct identifier grounding is a separate Phase 14.13 safety precondition for `AUTO_ELIGIBLE`.
+4. **Factual Evidence Transparency**: Direct, conflicting, and incomplete evidence states are surfaced factually (`direct_evidence_present`, `conflicting_evidence_present`, `incomplete_evidence_present`) without applying synthetic score penalties or bonuses.
+5. **Statistical Calibration Boundary**: Explicitly flagged as `is_statistically_calibrated = false`. The score is an evidence assessment, not a calibrated Bayesian/ML probability of correctness.
+
+### 2.6 Decision Policy Thresholds (Phase 14.13)
 - **Score $\ge 90$ + Direct Evidence + Zero Conflict**: Status = `AUTO_ELIGIBLE`. (Note: `AUTO_ELIGIBLE` qualifies a match for expedited review or one-click approval. It is strictly NOT `AUTO_APPLIED`. In the MVP, the system never silently mutates financial records without human review and an audit trail).
 - **Score $70–89$ OR Multi-Invoice Match**: Status = `MATCH_SUGGESTED` (routed to Review Center).
 - **Multiple competing combinations OR Ambiguous customer**: Status = `AMBIGUOUS` (requires review with conflict explanation).

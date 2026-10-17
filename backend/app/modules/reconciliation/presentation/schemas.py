@@ -898,16 +898,24 @@ class CandidateConfidenceAssessmentResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     invoice_id: UUID
+    candidate_id: Optional[UUID] = None
+    payment_id: Optional[UUID] = None
     invoice_number: str
     confidence_score: str
     confidence_level: str
     base_match_score: str
+    match_score: Optional[str] = None
     has_direct_evidence: bool
+    direct_evidence_present: Optional[bool] = None
     has_conflicting_evidence: bool
+    conflicting_evidence_present: Optional[bool] = None
+    has_incomplete_evidence: bool = False
+    incomplete_evidence_present: Optional[bool] = None
     adjustment_factors: List[ConfidenceAdjustmentFactorResponse]
     rule_version: str
     scoring_algorithm_version: str
     confidence_algorithm_version: str
+    algorithm_version: Optional[str] = None
     is_statistically_calibrated: bool
 
 

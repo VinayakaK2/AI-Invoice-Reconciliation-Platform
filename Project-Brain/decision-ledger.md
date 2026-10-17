@@ -334,12 +334,12 @@ This ledger documents the frozen architectural decisions made for the platform.
      Candidate confidence score directly anchors to the Phase 14.11 base match score ($\Delta = 0.00$). Base evidence signals are NOT re-added or double counted, and no unauthorized penalties, dampening, or ceilings are applied.
   3. **Factual Conflict Observation**:
      Contradictory or conflicting evidence from candidate bundles or payment context is surfaced factually (`has_conflicting_evidence = True`, `ConfidenceFactorType.CONFLICT_OBSERVED`, $\Delta = 0.00$).
-  4. **Semantic Qualitative Confidence Level Mapping**:
-     - `VERY_HIGH`: Score $\ge 90.00$ AND direct counterparty identifier match verified (Rule P-1).
-     - `HIGH`: Score $\ge 70.00$ (or Score $\ge 90.00$ without direct counterparty identifier grounding).
-     - `MEDIUM`: Score $\ge 40.00$.
-     - `LOW`: Score $> 0.00$.
-     - `NONE`: Score $== 0.00$.
+  4. **Canonical Qualitative Confidence Level Mapping**:
+     - `VERY_HIGH`: $90.00 \le \text{score} \le 100.00$ (pure confidence tier; does NOT require direct identifier. Direct identifier is a Phase 14.13 safety precondition for AUTO_ELIGIBLE).
+     - `HIGH`: $70.00 \le \text{score} < 90.00$.
+     - `MEDIUM`: $40.00 \le \text{score} < 70.00$.
+     - `LOW`: $0.00 < \text{score} < 40.00$.
+     - `NONE`: $\text{score} == 0.00$.
   5. **Canonical, Versioned, Immutable Policy**:
      Configuration is formalized as `ConfidencePolicy` (`CANONICAL_CONFIDENCE_POLICY`), preventing hidden mutable settings from altering confidence semantics.
   6. **Statistical Calibration Transparency**:

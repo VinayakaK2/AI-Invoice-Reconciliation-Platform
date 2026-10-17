@@ -73,6 +73,7 @@ class ConfidenceFactorType(str, Enum):
     BASE_MATCH_SCORE = "BASE_MATCH_SCORE"
     DIRECT_IDENTIFIER_GROUNDING = "DIRECT_IDENTIFIER_GROUNDING"
     CONFLICT_OBSERVED = "CONFLICT_OBSERVED"
+    INCOMPLETE_EVIDENCE_OBSERVED = "INCOMPLETE_EVIDENCE_OBSERVED"
 
 
 # ==============================================================================
@@ -167,6 +168,8 @@ class CandidateConfidenceAssessment:
     rule_version: str
     scoring_algorithm_version: str
     confidence_algorithm_version: str
+    has_incomplete_evidence: bool = False
+    payment_id: Optional[UUID] = None
     is_statistically_calibrated: bool = False
 
     def __post_init__(self) -> None:
@@ -175,19 +178,57 @@ class CandidateConfidenceAssessment:
         if self.base_match_score < Decimal("0.00") or self.base_match_score > Decimal("100.00"):
             raise DomainError(f"base_match_score must be between 0.00 and 100.00, got {self.base_match_score}")
 
+    @property
+    def candidate_id(self) -> UUID:
+        """Alias for invoice_id per required canonical confidence schema."""
+        return self.invoice_id
+
+    @property
+    def match_score(self) -> Decimal:
+        """Alias for base_match_score per required canonical confidence schema."""
+        return self.base_match_score
+
+    @property
+    def direct_evidence_present(self) -> bool:
+        """Alias for has_direct_evidence per required canonical confidence schema."""
+        return self.has_direct_evidence
+
+    @property
+    def conflicting_evidence_present(self) -> bool:
+        """Alias for has_conflicting_evidence per required canonical confidence schema."""
+        return self.has_conflicting_evidence
+
+    @property
+    def incomplete_evidence_present(self) -> bool:
+        """Alias for has_incomplete_evidence per required canonical confidence schema."""
+        return self.has_incomplete_evidence
+
+    @property
+    def algorithm_version(self) -> str:
+        """Alias for confidence_algorithm_version per required canonical confidence schema."""
+        return self.confidence_algorithm_version
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "invoice_id": str(self.invoice_id),
+            "candidate_id": str(self.invoice_id),
+            "payment_id": str(self.payment_id) if self.payment_id else None,
             "invoice_number": self.invoice_number,
             "confidence_score": str(self.confidence_score),
             "confidence_level": self.confidence_level.value,
             "base_match_score": str(self.base_match_score),
+            "match_score": str(self.base_match_score),
             "has_direct_evidence": self.has_direct_evidence,
+            "direct_evidence_present": self.has_direct_evidence,
             "has_conflicting_evidence": self.has_conflicting_evidence,
+            "conflicting_evidence_present": self.has_conflicting_evidence,
+            "has_incomplete_evidence": self.has_incomplete_evidence,
+            "incomplete_evidence_present": self.has_incomplete_evidence,
             "adjustment_factors": [f.to_dict() for f in self.adjustment_factors],
             "rule_version": self.rule_version,
             "scoring_algorithm_version": self.scoring_algorithm_version,
             "confidence_algorithm_version": self.confidence_algorithm_version,
+            "algorithm_version": self.confidence_algorithm_version,
             "is_statistically_calibrated": self.is_statistically_calibrated,
         }
 
@@ -270,22 +311,23 @@ class ConfidenceEngine:
     def _determine_confidence_level(
         self,
         score: Decimal,
-        has_direct_evidence: bool,
+        has_direct_evidence: bool = False,
     ) -> ConfidenceLevel:
-        """Derive qualitative confidence level from numeric score and direct evidence grounding.
+        """Derive qualitative confidence level from numeric score.
         
-        Authoritative mapping:
-        - VERY_HIGH: Score >= 90.00 AND direct identifier evidence present (Rule P-1).
-        - HIGH:      Score >= 70.00 (strong evidence support).
-        - MEDIUM:    Score >= 40.00 (moderate evidence support).
-        - LOW:       Score > 0.00 (weak circumstantial support).
-        - NONE:      Score == 0.00 (no supporting evidence).
+        Canonical presentation bands (Phase 14.12 contract):
+        - VERY_HIGH: Score >= 90.00 (90–100)
+        - HIGH:      Score >= 70.00 (70–89)
+        - MEDIUM:    Score >= 40.00 (40–69)
+        - LOW:       Score > 0.00   (1–39)
+        - NONE:      Score == 0.00  (0)
+
+        Note: VERY_HIGH does NOT require direct counterparty identifier grounding.
+        Direct identifier requirement is a Phase 14.13 Decision rule for AUTO_ELIGIBLE,
+        not a Phase 14.12 confidence classification condition.
         """
         if score >= self.policy.very_high_threshold:
-            # VERY_HIGH strictly requires direct counterparty evidence grounding
-            if has_direct_evidence:
-                return ConfidenceLevel.VERY_HIGH
-            return ConfidenceLevel.HIGH
+            return ConfidenceLevel.VERY_HIGH
 
         if score >= self.policy.high_threshold:
             return ConfidenceLevel.HIGH
@@ -323,7 +365,7 @@ class ConfidenceEngine:
             )
         )
 
-        # 2. Direct Evidence Grounding Check (e.g. Rule P-1 Bank Account or UPI VPA)
+        # 2. Direct Evidence Grounding Check (Factual observation, Rule P-1)
         has_direct = False
         if bundle is not None:
             has_direct = bundle.direct_evidence_count > 0
@@ -356,15 +398,26 @@ class ConfidenceEngine:
                 )
             )
 
-        # 4. Final Mathematical Score (Exact Decimal, bounded to [0.00, 100.00])
+        # 4. Incomplete Evidence Observation (Factually surfaced without inventing unauthorized penalties)
+        has_incomplete = False
+        if bundle is not None and bundle.missing_evidence_count > 0:
+            has_incomplete = True
+
+        if has_incomplete:
+            adjustments.append(
+                ConfidenceAdjustmentFactor(
+                    factor_type=ConfidenceFactorType.INCOMPLETE_EVIDENCE_OBSERVED,
+                    delta=Decimal("0.00"),
+                    description="Incomplete or missing evidence observed in candidate bundle",
+                )
+            )
+
+        # 5. Final Mathematical Score (Exact Decimal, bounded to [0.00, 100.00])
         final_confidence = min(self.policy.max_confidence, max(self.policy.min_confidence, base_score))
         final_confidence = final_confidence.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        # 5. Qualitative Rating Assignment
-        confidence_level = self._determine_confidence_level(
-            score=final_confidence,
-            has_direct_evidence=has_direct,
-        )
+        # 6. Qualitative Rating Assignment (Pure confidence bands: 90+, 70+, 40+, >0, 0)
+        confidence_level = self._determine_confidence_level(score=final_confidence)
 
         return CandidateConfidenceAssessment(
             invoice_id=candidate_score.invoice_id,
@@ -374,6 +427,8 @@ class ConfidenceEngine:
             base_match_score=base_score,
             has_direct_evidence=has_direct,
             has_conflicting_evidence=has_conflict,
+            has_incomplete_evidence=has_incomplete,
+            payment_id=payment_evidence.payment_id,
             adjustment_factors=adjustments,
             rule_version=self.policy.rule_version,
             scoring_algorithm_version=candidate_score.algorithm_version,
